@@ -145,6 +145,8 @@ MIN_CPU = 30
 MIN_MEMORY = 30
 TARGET_OPP_UTILITY = 5.0
 LEARNER_ACCEPT_UTILITY_THRESHOLD = 5.0
+MIN_LEARNER_RESOURCE_FLOOR = 8
+MIN_LEARNER_UTILITY_FLOOR = 1.2
 
 
 def _utility_from_allocation(
@@ -223,6 +225,94 @@ def _build_consensus_opponent_first_action(
     parts = [f"learner: gpu {learner['gpu']} cpu {learner['cpu']} memory {learner['memory']}"]
     for opp in opponents:
         parts.append(f"{opp}: gpu {per_opp} cpu {per_opp} memory {per_opp}")
+    return "PROPOSE: " + "; ".join(parts)
+
+
+def _balanced_incremental_counter_offer(
+    obs: Dict[str, Any],
+    step_size: int = 2,
+) -> str:
+    """Incrementally improve only rejecting opponents while protecting learner."""
+    agent_ids = list(obs.get("agent_ids", build_agent_ids(2)))
+    opponents = [a for a in agent_ids if a != "learner"]
+    total_pool = int(float(obs.get("total_pool", 100.0)))
+    history = obs.get("conversation_history", [])
+    status = _recent_opponent_status(history, opponents)
+    rejected = [opp for opp in opponents if status.get(opp) == "reject"]
+    if not rejected:
+        return _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
+
+    parsed = _parse_proposal_text(str(obs.get("last_proposal", "")))
+    if set(parsed.keys()) != set(agent_ids):
+        return _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
+
+    alloc: Dict[str, Dict[str, int]] = {
+        a: {rk: int(round(float(parsed[a].get(rk, 0.0)))) for rk in ("gpu", "cpu", "memory")}
+        for a in agent_ids
+    }
+
+    def learner_utility_with(a: Dict[str, Dict[str, int]]) -> float:
+        return _utility_from_allocation(
+            a.get("learner", {}),
+            obs.get("private_utility", [0.33, 0.33, 0.34]),
+            float(total_pool),
+        )
+
+    for opp in rejected:
+        for rk in ("gpu", "cpu", "memory"):
+            added = 0
+            while added < step_size:
+                # Primary donor: learner, but never below floor.
+                can_take_from_learner = (
+                    alloc["learner"][rk] > MIN_LEARNER_RESOURCE_FLOOR
+                )
+                if can_take_from_learner:
+                    alloc["learner"][rk] -= 1
+                    if learner_utility_with(alloc) < MIN_LEARNER_UTILITY_FLOOR:
+                        alloc["learner"][rk] += 1
+                        can_take_from_learner = False
+                if can_take_from_learner:
+                    alloc[opp][rk] += 1
+                    added += 1
+                    continue
+
+                # Secondary donor: over-allocated rejecting peers only (keep accepted unchanged).
+                donor = None
+                for cand in rejected:
+                    if cand == opp:
+                        continue
+                    if alloc[cand][rk] > alloc[opp][rk] + 2:
+                        donor = cand
+                        break
+                if donor is None:
+                    break
+                alloc[donor][rk] -= 1
+                alloc[opp][rk] += 1
+                added += 1
+
+    # Ensure exact totals remain valid.
+    for rk in ("gpu", "cpu", "memory"):
+        cur = sum(alloc[a][rk] for a in agent_ids)
+        diff = total_pool - cur
+        if diff > 0:
+            alloc["learner"][rk] += diff
+        elif diff < 0:
+            take = min(alloc["learner"][rk], -diff)
+            alloc["learner"][rk] -= take
+            rem = -diff - take
+            if rem > 0:
+                for opp in rejected:
+                    t = min(alloc[opp][rk], rem)
+                    alloc[opp][rk] -= t
+                    rem -= t
+                    if rem == 0:
+                        break
+
+    parts = []
+    for a in agent_ids:
+        parts.append(
+            f"{a}: gpu {alloc[a]['gpu']} cpu {alloc[a]['cpu']} memory {alloc[a]['memory']}"
+        )
     return "PROPOSE: " + "; ".join(parts)
 
 
@@ -379,7 +469,13 @@ def strategic_baseline_policy(obs: Dict[str, Any], round_num: int) -> str:
     if len(opponents) >= 3:
         if round_num == 1:
             return _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
-        return _build_consensus_opponent_first_action(total_pool=total_pool, agent_ids=agent_ids)
+        if _all_opponents_accepted(history, opponents):
+            parsed = _parse_proposal_text(str(obs.get("last_proposal", "")))
+            learner_alloc = parsed.get("learner", {})
+            learner_util = _utility_from_allocation(learner_alloc, utility, total_pool)
+            if learner_util >= LEARNER_ACCEPT_UTILITY_THRESHOLD:
+                return "ACCEPT: YES"
+        return _balanced_incremental_counter_offer(obs, step_size=2)
 
     if round_num == 1:
         return _build_biased_proposal(

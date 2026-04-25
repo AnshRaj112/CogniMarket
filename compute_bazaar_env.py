@@ -996,9 +996,17 @@ class ComputeBazaarEnv(_BaseEnv):
         # Best uniform per-opponent integer share when learner is minimized.
         max_uniform_share = self.total_pool // max(len(self.opponent_ids), 1)
         feasible_uniform_utility = (max_uniform_share / max(self.total_pool, 1e-6)) * MAX_UTILITY_SCALE
+        # Keep a learner reserve so deals do not collapse learner utility.
+        learner_reserve = 10.0
+        per_opp_with_reserve = max(0.0, (self.total_pool - learner_reserve) / max(len(self.opponent_ids), 1))
+        feasible_with_reserve = (per_opp_with_reserve / max(self.total_pool, 1e-6)) * MAX_UTILITY_SCALE
         # Use a small stability margin to avoid deadlocks around integer/tie edges.
         stability_margin = 0.05
-        return min(base_threshold, max(0.0, float(feasible_uniform_utility) - stability_margin))
+        return min(
+            base_threshold,
+            max(0.0, float(feasible_uniform_utility) - stability_margin),
+            max(0.0, float(feasible_with_reserve) - stability_margin),
+        )
 
     def _sample_utilities(self, difficulty: str = "hard") -> Dict[str, List[float]]:
         """Sample private utility vectors for learner and two opponents."""
