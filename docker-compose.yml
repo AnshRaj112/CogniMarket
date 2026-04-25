@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    container_name: cognimarket-web
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - .:/app
