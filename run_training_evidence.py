@@ -67,6 +67,23 @@ def evaluate_policy_metrics(
     num_opponents: int,
 ) -> Dict[str, Any]:
     """Run fixed-seed multi-episode eval and return aggregate metrics."""
+    def safe_policy(obs: Dict[str, Any], round_num: int) -> str:
+        """Guard evaluation against strict model-policy generation failures.
+
+        Some model checkpoints (especially untrained/base) can fail proposal
+        validation and raise exceptions from `evaluate.make_model_policy`.
+        Instead of aborting the entire evidence run, we fallback to the
+        strategic baseline policy for that single step.
+        """
+        try:
+            return policy(obs, round_num)
+        except Exception as exc:
+            print(
+                f"[warn] policy='{policy_name}' failed at round={round_num}: {exc}. "
+                "Falling back to strategic baseline for this step."
+            )
+            return strategic_baseline_policy(obs, round_num)
+
     env = ComputeBazaarEnv(
         max_rounds=max_rounds,
         seed=seed,
@@ -75,7 +92,7 @@ def evaluate_policy_metrics(
     results: List[Dict[str, Any]] = []
     for ep in range(1, num_episodes + 1):
         ep_seed = seed + ep
-        results.append(run_episode(env, difficulty=difficulty, seed=ep_seed, policy=policy))
+        results.append(run_episode(env, difficulty=difficulty, seed=ep_seed, policy=safe_policy))
 
     rewards = [float(r["total_reward"]) for r in results]
     utilities = [float(r["utility_achieved"]) for r in results]
