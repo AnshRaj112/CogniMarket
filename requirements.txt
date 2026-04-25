@@ -1,5 +1,6 @@
 matplotlib
 pandas
+openenv==0.1.13
 gymnasium
 groq
 google-genai

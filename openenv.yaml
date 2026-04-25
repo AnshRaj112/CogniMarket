@@ -1,0 +1,16 @@
+name: cogni-market
+version: "0.1.0"
+description: Multi-agent compute allocation negotiation environment.
+framework: openenv
+environment:
+  id: ComputeBazaar-v0
+  entry_point: compute_bazaar_env:ComputeBazaarEnv
+  registration_module: openenv_registration:register_compute_bazaar_env
+api:
+  reset: true
+  step: true
+  state: true
+  close: false
+links:
+  space: https://huggingface.co/spaces/AnshRaj112/cognimarket
+  colab: https://colab.research.google.com/drive/16G-Juzt6g9FrDaB2WJRVElHeMheKWnlz?usp=sharing

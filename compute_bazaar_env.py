@@ -430,6 +430,14 @@ class ComputeBazaarEnv(_BaseEnv):
         self._last_opponent_utility = 0.0
         return self._build_obs(), {"difficulty": self._difficulty}
 
+    def state(self) -> Dict[str, Any]:
+        """Return current observable state without advancing the episode.
+
+        Exposes a Gym/OpenEnv-friendly state accessor for inspectors, UI layers,
+        and wrappers that need read-only access between reset/step calls.
+        """
+        return self._build_obs()
+
     def step(self, action: str) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
         """Execute one learner turn with automatic opponent reactions.
 

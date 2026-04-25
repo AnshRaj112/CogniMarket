@@ -48,6 +48,7 @@ Core files:
 - Environment: [`compute_bazaar_env.py`](./compute_bazaar_env.py)
 - Reward logic: [`reward.py`](./reward.py)
 - Training: [`train.py`](./train.py)
+- OpenEnv manifest: [`openenv.yaml`](./openenv.yaml)
 
 ## How the Environment Works
 
@@ -81,6 +82,7 @@ What changed after training:
 - Efficiency: `+2.818` reward-per-round
 
 ![CogniMarket reward progress and evaluation](./reward_plot.png)
+*Caption: Top panel shows GRPO reward metrics over training steps; bottom panel compares baseline, pre-training, and post-training performance on the same seeds.*
 
 ## Why It Matters
 
@@ -98,12 +100,17 @@ Why:
 ### Hugging Face Space
 - [AnshRaj112/cognimarket](https://huggingface.co/spaces/AnshRaj112/cognimarket)
 
+### Colab training notebook
+- [CogniMarket training notebook](https://colab.research.google.com/drive/16G-Juzt6g9FrDaB2WJRVElHeMheKWnlz?usp=sharing)
+
 ### Minimal local run
 ```bash
 pip install -r requirements.txt
+# Includes OpenEnv latest release: openenv==0.1.13
 python train.py
 python run_training_evidence.py --checkpoint-dir ./checkpoints --difficulty hard --seed 42
 python plot_training_rewards.py --checkpoint-dir ./checkpoints --smooth 10
+python plot_training_loss.py --checkpoint-dir ./checkpoints --smooth 10
 ```
 
 ## Submission Assets
@@ -112,12 +119,16 @@ python plot_training_rewards.py --checkpoint-dir ./checkpoints --smooth 10
 - Evidence runner: [`run_training_evidence.py`](./run_training_evidence.py)
 - Evidence summary: [`evidence_summary.md`](./evidence_summary.md)
 - Reward/eval plot: [`reward_plot.png`](./reward_plot.png)
+- Loss plot generator: [`plot_training_loss.py`](./plot_training_loss.py)
 
 ## Additional References
 
 - Environment on Hugging Face Space: [AnshRaj112/cognimarket](https://huggingface.co/spaces/AnshRaj112/cognimarket)
+- Colab training notebook: [CogniMarket training notebook](https://colab.research.google.com/drive/16G-Juzt6g9FrDaB2WJRVElHeMheKWnlz?usp=sharing)
 - Training evidence summary: [`evidence_summary.md`](./evidence_summary.md)
 - Reward and evaluation plot: [`reward_plot.png`](./reward_plot.png)
+- Loss plot (generate and commit): `checkpoints/loss_plot.png` via [`plot_training_loss.py`](./plot_training_loss.py)
 - Training pipeline: [`train.py`](./train.py), [`run_training_evidence.py`](./run_training_evidence.py)
+- W&B run: not used in this run (`train.py` supports optional `--report-to wandb`).
 - Additional media (video/blog/slides/presentation): not included in this submission.
 
