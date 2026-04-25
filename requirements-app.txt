@@ -1,0 +1,7 @@
+# Minimal requirements for running the CogniMarket Gradio UI
+gradio
+gymnasium
+groq
+google-genai
+python-dotenv
+scipy

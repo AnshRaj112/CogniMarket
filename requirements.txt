@@ -1,0 +1,17 @@
+matplotlib
+pandas
+gymnasium
+groq
+google-genai
+transformers
+trl
+peft
+accelerate
+bitsandbytes
+datasets
+scipy
+gradio
+python-dotenv
+mergekit
+llm-blender
+weave
