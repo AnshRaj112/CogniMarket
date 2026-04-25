@@ -558,6 +558,33 @@ python train.py \
     --save-dir ./checkpoints
 ```
 
+### End-to-End Training Evidence (Required for writeup)
+
+After training, run a fixed-seed comparison on the real environment:
+
+```bash
+python run_training_evidence.py \
+    --checkpoint-dir ./checkpoints \
+    --base-model unsloth/Qwen2.5-1.5B-Instruct-bnb-4bit \
+    --episodes 200 \
+    --difficulty hard \
+    --max-rounds 12 \
+    --seed 42
+```
+
+This writes:
+
+- `checkpoints/training_progress.json` (baseline vs untrained vs trained metrics)
+- `checkpoints/evidence_summary.md` (paste-ready README/writeup section)
+
+Then generate curves + comparison bars:
+
+```bash
+python plot_training_rewards.py --checkpoint-dir ./checkpoints --smooth 10
+```
+
+Include both `checkpoints/reward_plot.png` and the metrics table in your README.
+
 ### Hyperparameters
 
 | Parameter | Default | Description |
