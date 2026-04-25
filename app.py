@@ -409,7 +409,8 @@ with gr.Blocks() as demo:
             with gr.Column(elem_classes="panel-card"):
                 gr.Markdown("### SCENARIO CONFIG")
                 diff_drop = gr.Dropdown(choices=["easy", "hard"], value="hard", label="COMPLEXITY LEVEL")
-                opp_count = gr.Dropdown(choices=[2, 3, 4], value=2, label="AGENT POPULATION")
+                opp_count = gr.Dropdown(choices=[2, 3, 4], value=2, label="NUMBER OF OPPONENTS")
+                gr.Markdown("<p style='font-size: 0.8em; color: #94a3b8; margin-top: -10px;'>Total Agents: [Opponents + Learner]</p>")
                 restart_btn = gr.Button("RESTART SCENARIO", variant="secondary")
 
     # --- Event Wiring ---
