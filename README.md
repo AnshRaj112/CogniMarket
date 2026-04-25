@@ -1,3 +1,12 @@
+---
+title: Cognimarket
+emoji: 👀
+colorFrom: red
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
 # CogniMarket — Compute Allocation Bazaar
 
 A lightweight, Colab-friendly research framework for training language models to negotiate compute resource allocations through multi-agent reinforcement learning.
@@ -764,3 +773,5 @@ Curriculum learning is standard practice in RL. Starting with `easy` (aligned pr
   - [x] Refactor hard-coded agent/resource dimensions into env config (`agent_ids`, `resource_keys`)
   - [x] Generalize allocation parsing/validation inside env methods for dynamic schemas
   - [x] Update utility sampling, pool tracking, and observation shapes for dynamic dimensions
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
