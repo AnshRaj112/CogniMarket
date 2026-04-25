@@ -429,9 +429,30 @@ class ComputeBazaarEnv(_BaseEnv):
         round_penalty = ROUND_PENALTY
         reward = round_penalty
         fallback_used = False
+        rejected_last_round = self._last_opponent_response in {"rejected", "partial_accept", "repeated_proposal"}
+        accept_blocked = False
+        accept_block_reason = "none"
 
         # --- FIX #2, #3, #5: Clean, normalize, and extract single action ---
         action = clean_action(action)
+
+        # Block invalid ACCEPT behavior and force proposal to avoid idle loops.
+        if action.strip().upper().startswith("ACCEPT: YES"):
+            deal_complete_now = self._deal is not None and self._deal.accepted_by >= set(self.agent_ids)
+            if not deal_complete_now:
+                action = self._force_new_proposal()
+                accept_blocked = True
+                accept_block_reason = "accept_without_complete_deal"
+                print(f"DEBUG [env.step R{self.rounds_used}]: Blocked invalid ACCEPT -> forced PROPOSE")
+
+        # If prior round did not converge, require a new proposal this round.
+        if rejected_last_round and not action.lower().startswith("propose:"):
+            action = self._force_new_proposal()
+            if not accept_blocked:
+                accept_blocked = True
+                accept_block_reason = "must_repropose_after_rejection"
+            print(f"DEBUG [env.step R{self.rounds_used}]: Forced PROPOSE after rejection loop")
+
         if action.lower().startswith("propose:"):
             action, fallback_used = validate_and_fix_proposal_with_meta(
                 action,
@@ -442,6 +463,9 @@ class ComputeBazaarEnv(_BaseEnv):
         if fallback_used:
             # Explicitly penalize malformed proposals; no more silent fallback.
             reward -= 5.0
+        if accept_blocked:
+            # Penalize useless ACCEPT attempts that cannot close a deal.
+            reward -= 3.0
 
         action_type, parsed_proposal = self._parse_action(action)
         prev_opp_utility = float(self._last_opponent_utility)
@@ -523,7 +547,9 @@ class ComputeBazaarEnv(_BaseEnv):
             deficit = max(0.0, threshold - opponent_utility)
             decay = 1.0 / max(1.0, math.sqrt(len(self.opponent_ids)))
             reward -= 1.5 * deficit / max(threshold, 1e-6) * decay
-        reward += delta_opponent_utility
+        if rejected_last_round:
+            # Encourage adaptation only when previous outcome needed improvement.
+            reward += delta_opponent_utility
         if self._deal is not None:
             accepted_count = len(self._deal.accepted_by)
             coalition_ratio = accepted_count / max(1, len(self.agent_ids))
@@ -540,7 +566,7 @@ class ComputeBazaarEnv(_BaseEnv):
             # Guardrail: rejected / non-terminal states should not end up net-positive.
             reward = min(reward, -0.1)
         if action_type == "accept" and not deal_closed:
-            reward -= 5.0  # Heavy penalty for ACCEPT spam when deal isn't closed
+            reward -= 3.0
 
         if self.rounds_used >= self.max_rounds and not self._terminated:
             self._truncated = True
@@ -566,16 +592,75 @@ class ComputeBazaarEnv(_BaseEnv):
             "opponent_utility": round(opponent_utility, 4),
             "delta_opponent_utility": round(delta_opponent_utility, 4),
             "fallback_used": fallback_used,
+            "accept_blocked": accept_blocked,
+            "accept_block_reason": accept_block_reason,
+            "rejected_last_round": rejected_last_round,
         }
         print(f"DEBUG [env.step R{self.rounds_used}]: reward={reward:.2f}, "
               f"terminated={self._terminated}, truncated={self._truncated}, "
               f"success={success}, utility={utility:.2f}")
         return self._build_obs(), float(reward), self._terminated, self._truncated, info
 
+    def _force_new_proposal(self) -> str:
+        """Return a deterministic proposal when ACCEPT must be blocked.
+
+        Prefers adapting the current deal by shifting a small amount from learner
+        to opponents; falls back to equal split if no deal exists yet.
+        """
+        if self._deal is None:
+            return _safe_fallback_proposal(
+                total_pool=int(self.total_pool),
+                agent_ids=self.agent_ids,
+                resource_keys=self.resource_keys,
+            )
+
+        shifted: Dict[str, Dict[str, float]] = {
+            a: {rk: float(self._deal.proposal.get(a, {}).get(rk, 0.0)) for rk in self.resource_keys}
+            for a in self.agent_ids
+        }
+        learner = "learner"
+        if learner not in shifted:
+            return _safe_fallback_proposal(
+                total_pool=int(self.total_pool),
+                agent_ids=self.agent_ids,
+                resource_keys=self.resource_keys,
+            )
+
+        opponents = [a for a in self.agent_ids if a != learner]
+        if not opponents:
+            return _safe_fallback_proposal(
+                total_pool=int(self.total_pool),
+                agent_ids=self.agent_ids,
+                resource_keys=self.resource_keys,
+            )
+
+        for rk in self.resource_keys:
+            transfer = min(3.0, shifted[learner][rk])
+            if transfer <= 0:
+                continue
+            shifted[learner][rk] -= transfer
+            per_opp = transfer / len(opponents)
+            for opp in opponents:
+                shifted[opp][rk] += per_opp
+
+        parts = []
+        for agent in self.agent_ids:
+            segments = [f"{rk} {shifted[agent][rk]:.3f}" for rk in self.resource_keys]
+            parts.append(f"{agent}: " + " ".join(segments))
+        forced = "PROPOSE: " + "; ".join(parts)
+        normalized, _ = validate_and_fix_proposal_with_meta(
+            forced,
+            total_pool=int(self.total_pool),
+            agent_ids=self.agent_ids,
+            resource_keys=self.resource_keys,
+        )
+        return normalized
+
     def _build_obs(self) -> Dict[str, Any]:
         return {
             "conversation_history": self.history[-8:],
             "private_utility": self.utilities.get("learner", [0.0, 0.0, 0.0]),
+            "total_pool": float(self.total_pool),
             "remaining_compute_pool": self._remaining_pool(),
             "agent_ids": list(self.agent_ids),
             "resource_keys": list(self.resource_keys),

@@ -64,7 +64,7 @@ def baseline_policy(obs: Dict[str, Any], round_num: int) -> str:
         An action string.
     """
     agent_ids = obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"])
-    total_pool = float(obs.get("remaining_compute_pool", {}).get("gpu", 100.0))
+    total_pool = float(obs.get("total_pool", 100.0))
     equal_split_action = _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
     if round_num == 1:
         return equal_split_action
@@ -72,7 +72,24 @@ def baseline_policy(obs: Dict[str, Any], round_num: int) -> str:
     history = obs.get("conversation_history", [])
     if any("accept" in turn for turn in history if not turn.startswith("learner")):
         return "ACCEPT: YES"
-    return equal_split_action
+    # Threshold-aware concession for multi-opponent scenarios.
+    # In easy mode, opponents typically need >=4 utility; allocating 30% each gives
+    # 4.5 utility regardless of utility vector shape (0.30 * 15).
+    opponents = [a for a in agent_ids if a != "learner"]
+    if not opponents:
+        return equal_split_action
+    pool_i = int(total_pool)
+    target_opp = max(0, min(pool_i, int(round(0.30 * pool_i))))
+    total_needed = target_opp * len(opponents)
+    if total_needed > pool_i:
+        target_opp = pool_i // len(opponents)
+        total_needed = target_opp * len(opponents)
+    learner_share = max(0, pool_i - total_needed)
+
+    parts = [f"learner: gpu {learner_share} cpu {learner_share} memory {learner_share}"]
+    for opp in opponents:
+        parts.append(f"{opp}: gpu {target_opp} cpu {target_opp} memory {target_opp}")
+    return "PROPOSE: " + "; ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +368,7 @@ def make_model_policy(model, tokenizer, difficulty: str, max_rounds: int) -> Cal
         nonlocal last_raw_output
         agent_ids = tuple(obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"]))
         resource_keys = tuple(obs.get("resource_keys", ["gpu", "cpu", "memory"]))
-        total_pool = int(float(obs.get("remaining_compute_pool", {}).get("gpu", 100.0)))
+        total_pool = int(float(obs.get("total_pool", 100.0)))
 
         def _generate_once() -> str:
             prompt_local = _build_prompt_from_obs(obs, round_num, difficulty, max_rounds)
