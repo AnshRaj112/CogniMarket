@@ -196,6 +196,21 @@ def proposal_has_all_agents(
     return all(v >= 0.0 for a in parsed.values() for v in a.values())
 
 
+def extract_agents_from_proposal_text(action: str) -> List[str]:
+    """Extract mentioned agent ids from a PROPOSE action."""
+    stripped = action.strip()
+    if not re.match(r"^PROPOSE\s*:", stripped, re.IGNORECASE):
+        return []
+    proposal_body = re.sub(r"^PROPOSE\s*:\s*", "", stripped, flags=re.IGNORECASE)
+    agents: List[str] = []
+    for chunk in [c.strip() for c in proposal_body.split(";") if c.strip()]:
+        if ":" not in chunk:
+            continue
+        aid = chunk.split(":", 1)[0].strip().lower()
+        agents.append(aid)
+    return agents
+
+
 def validate_and_fix_proposal_with_meta(
     action: str,
     total_pool: int = 100,
@@ -223,18 +238,18 @@ def validate_and_fix_proposal_with_meta(
 
     # Must be PROPOSE
     if not re.match(r"^PROPOSE\s*:", stripped, re.IGNORECASE):
-        print(f"DEBUG [validate_proposal]: Not ACCEPT or PROPOSE, returning fallback")
-        return _safe_fallback_proposal(total_pool, agent_ids, resource_keys), True
+        print("DEBUG [validate_proposal]: Not ACCEPT or PROPOSE")
+        return stripped, True
 
     proposal_body = re.sub(r"^PROPOSE\s*:\s*", "", stripped, flags=re.IGNORECASE)
 
     alloc = _parse_proposal_structured(proposal_body, agent_ids, resource_keys)
     if alloc is None:
-        print("DEBUG [validate_proposal]: Structured parse failed, using fallback")
-        return _safe_fallback_proposal(total_pool, agent_ids, resource_keys), True
+        print("DEBUG [validate_proposal]: Structured parse failed")
+        return stripped, True
     if any(value < 0.0 for a in alloc.values() for value in a.values()):
-        print("DEBUG [validate_proposal]: Negative value detected, using fallback")
-        return _safe_fallback_proposal(total_pool, agent_ids, resource_keys), True
+        print("DEBUG [validate_proposal]: Negative value detected")
+        return stripped, True
 
     # Normalize each resource to sum to EXACTLY total_pool using largest-remainder
     agents = list(agent_ids)
@@ -429,6 +444,7 @@ class ComputeBazaarEnv(_BaseEnv):
         round_penalty = ROUND_PENALTY
         reward = round_penalty
         fallback_used = False
+        invalid_proposal = False
         rejected_last_round = self._last_opponent_response in {"rejected", "partial_accept", "repeated_proposal"}
         accept_blocked = False
         accept_block_reason = "none"
@@ -454,15 +470,27 @@ class ComputeBazaarEnv(_BaseEnv):
             print(f"DEBUG [env.step R{self.rounds_used}]: Forced PROPOSE after rejection loop")
 
         if action.lower().startswith("propose:"):
-            action, fallback_used = validate_and_fix_proposal_with_meta(
+            expected_agents = list(self.agent_ids)
+            generated_agents = extract_agents_from_proposal_text(action)
+            print(f"DEBUG [env.step R{self.rounds_used}]: EXPECTED AGENTS: {expected_agents}")
+            print(f"DEBUG [env.step R{self.rounds_used}]: GENERATED AGENTS: {generated_agents}")
+            action, invalid_proposal = validate_and_fix_proposal_with_meta(
                 action,
                 int(self.total_pool),
                 self.agent_ids,
                 self.resource_keys,
             )
-        if fallback_used:
-            # Explicitly penalize malformed proposals; no more silent fallback.
-            reward -= 5.0
+            if invalid_proposal:
+                reward -= 10.0
+                forced = self._force_new_proposal()
+                print(f"DEBUG [env.step R{self.rounds_used}]: Invalid proposal -> forced regenerate proposal")
+                action, _ = validate_and_fix_proposal_with_meta(
+                    forced,
+                    int(self.total_pool),
+                    self.agent_ids,
+                    self.resource_keys,
+                )
+                fallback_used = True
         if accept_blocked:
             # Penalize useless ACCEPT attempts that cannot close a deal.
             reward -= 3.0
@@ -541,6 +569,7 @@ class ComputeBazaarEnv(_BaseEnv):
         opponent_utility = self._avg_opponent_utility(self._deal.proposal if self._deal else None)
         delta_opponent_utility = opponent_utility - prev_opp_utility
         threshold = EASY_ACCEPTANCE_THRESHOLD if self._difficulty == "easy" else HARD_ACCEPTANCE_THRESHOLD
+        threshold = self._effective_acceptance_threshold(threshold)
         reward += 0.5 * (opponent_utility / max(threshold, 1e-6))
         if opponent_utility < threshold:
             # Multi-agent difficulty: soften hard threshold into decayed penalty.
@@ -592,6 +621,7 @@ class ComputeBazaarEnv(_BaseEnv):
             "opponent_utility": round(opponent_utility, 4),
             "delta_opponent_utility": round(delta_opponent_utility, 4),
             "fallback_used": fallback_used,
+            "invalid_proposal": invalid_proposal,
             "accept_blocked": accept_blocked,
             "accept_block_reason": accept_block_reason,
             "rejected_last_round": rejected_last_round,
@@ -842,12 +872,14 @@ class ComputeBazaarEnv(_BaseEnv):
 
         api_key = os.environ.get("GROQ_API_KEY")
         use_llm = _GROQ_AVAILABLE and api_key
+        opponent_utilities_log: Dict[str, float] = {}
 
         for opponent in self.opponent_ids:
             utility = self._calculate_utility(
                 allocation=self._deal.proposal.get(opponent, {}),
                 utility_vector=self.utilities[opponent],
             )
+            opponent_utilities_log[opponent] = round(float(utility), 4)
             
             # fallback/rule-based threshold evaluation
             threshold = (
@@ -855,6 +887,7 @@ class ComputeBazaarEnv(_BaseEnv):
                 if self._difficulty == "easy"
                 else HARD_ACCEPTANCE_THRESHOLD
             )
+            threshold = self._effective_acceptance_threshold(threshold)
             rule_based_accept = utility >= threshold
             
             if use_llm:
@@ -914,6 +947,7 @@ class ComputeBazaarEnv(_BaseEnv):
                 self.history.append(f"{opponent}: reject, please improve my share.")
                 print(f"DEBUG [_run_opponents]: {opponent} rule-reject (utility={utility:.2f} < {threshold}), "
                       f"accepted_by={self._deal.accepted_by}")
+        print(f"DEBUG [_run_opponents]: Opponent utilities: {opponent_utilities_log}")
 
     def get_opponent_personalities(self) -> Dict[str, str]:
         """Infer opponent personalities from their utility weights."""
@@ -950,6 +984,21 @@ class ComputeBazaarEnv(_BaseEnv):
         vec = [min(max(float(allocation.get(k, 0.0)), 0.0), self.total_pool) for k in self.resource_keys]
         scaled = [v / self.total_pool for v in vec]
         return float(sum(v * w for v, w in zip(scaled, utility_vector)) * MAX_UTILITY_SCALE)
+
+    def _effective_acceptance_threshold(self, base_threshold: float) -> float:
+        """Return a feasible acceptance threshold for current agent count.
+
+        For many-opponent settings with integer allocations, a strict fixed threshold
+        can become practically unreachable for all opponents simultaneously.
+        """
+        if len(self.opponent_ids) <= 2:
+            return base_threshold
+        # Best uniform per-opponent integer share when learner is minimized.
+        max_uniform_share = self.total_pool // max(len(self.opponent_ids), 1)
+        feasible_uniform_utility = (max_uniform_share / max(self.total_pool, 1e-6)) * MAX_UTILITY_SCALE
+        # Use a small stability margin to avoid deadlocks around integer/tie edges.
+        stability_margin = 0.05
+        return min(base_threshold, max(0.0, float(feasible_uniform_utility) - stability_margin))
 
     def _sample_utilities(self, difficulty: str = "hard") -> Dict[str, List[float]]:
         """Sample private utility vectors for learner and two opponents."""

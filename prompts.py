@@ -208,6 +208,7 @@ Recent conversation:
 {strategy_hints}
 You are negotiating with {num_opponents} opponents: {", ".join(opponent_ids) if opponent_ids else "(none)"}.
 You MUST include all agents in every proposal.
+If any agent is missing, the proposal is INVALID.
 Produce a single negotiation action. You MUST use one of these two formats:
 1. PROPOSE: {proposal_template}
 2. ACCEPT: YES (to accept current deal) or ACCEPT: NO (to reject/counter)

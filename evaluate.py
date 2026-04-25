@@ -40,7 +40,7 @@ def _build_equal_split_action(
     first ``total_pool % 3`` agents each receive one extra unit to ensure
     the pool is fully allocated.
     """
-    agents = tuple(agent_ids or ["learner", "opponent_1", "opponent_2"])
+    agents = tuple(agent_ids or build_agent_ids(2))
     per_agent = int(total_pool) // len(agents)
     remainder = int(total_pool) % len(agents)
     parts = []
@@ -63,32 +63,73 @@ def baseline_policy(obs: Dict[str, Any], round_num: int) -> str:
     Returns:
         An action string.
     """
-    agent_ids = obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"])
+    agent_ids = obs.get("agent_ids", build_agent_ids(2))
     total_pool = float(obs.get("total_pool", 100.0))
     equal_split_action = _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
     if round_num == 1:
         return equal_split_action
-    # If the deal exists in the history (any opponent said "accept"), mirror-accept.
-    history = obs.get("conversation_history", [])
-    if any("accept" in turn for turn in history if not turn.startswith("learner")):
-        return "ACCEPT: YES"
-    # Threshold-aware concession for multi-opponent scenarios.
-    # In easy mode, opponents typically need >=4 utility; allocating 30% each gives
-    # 4.5 utility regardless of utility vector shape (0.30 * 15).
     opponents = [a for a in agent_ids if a != "learner"]
+    # Accept only when all opponents accepted and learner utility is good.
+    history = obs.get("conversation_history", [])
+    if _all_opponents_accepted(history, opponents):
+        parsed = _parse_proposal_text(str(obs.get("last_proposal", "")))
+        learner_alloc = parsed.get("learner", {})
+        learner_util = _utility_from_allocation(
+            learner_alloc,
+            obs.get("private_utility", [0.33, 0.33, 0.34]),
+            total_pool,
+        )
+        if learner_util >= LEARNER_ACCEPT_UTILITY_THRESHOLD:
+            return "ACCEPT: YES"
+
+    # Utility-aware concession for multi-opponent scenarios.
     if not opponents:
         return equal_split_action
     pool_i = int(total_pool)
-    target_opp = max(0, min(pool_i, int(round(0.30 * pool_i))))
-    total_needed = target_opp * len(opponents)
-    if total_needed > pool_i:
-        target_opp = pool_i // len(opponents)
-        total_needed = target_opp * len(opponents)
-    learner_share = max(0, pool_i - total_needed)
+    remaining = {"gpu": pool_i, "cpu": pool_i, "memory": pool_i}
+    opponent_allocs: Dict[str, Dict[str, int]] = {}
+    # We do not observe true opponent weights here; use neutral proxy weights.
+    opponent_weights = [1 / 3, 1 / 3, 1 / 3]
+    for idx, opp in enumerate(opponents):
+        opponents_left = len(opponents) - idx
+        caps = {
+            # Fair-share cap to avoid early opponents starving later ones.
+            "gpu": max(remaining["gpu"] // max(opponents_left, 1), 0),
+            "cpu": max(remaining["cpu"] // max(opponents_left, 1), 0),
+            "memory": max(remaining["memory"] // max(opponents_left, 1), 0),
+        }
+        alloc = _greedy_target_allocation(
+            opponent_weights=opponent_weights,
+            target_utility=TARGET_OPP_UTILITY,
+            total_pool=pool_i,
+            resource_caps=caps,
+        )
+        # Minimum heuristic floors where feasible
+        alloc["gpu"] = min(caps["gpu"], max(alloc["gpu"], min(MIN_GPU, caps["gpu"])))
+        alloc["cpu"] = min(caps["cpu"], max(alloc["cpu"], min(MIN_CPU, caps["cpu"])))
+        alloc["memory"] = min(caps["memory"], max(alloc["memory"], min(MIN_MEMORY, caps["memory"])))
+        opponent_allocs[opp] = alloc
+        remaining["gpu"] -= alloc["gpu"]
+        remaining["cpu"] -= alloc["cpu"]
+        remaining["memory"] -= alloc["memory"]
 
-    parts = [f"learner: gpu {learner_share} cpu {learner_share} memory {learner_share}"]
+    parts = [
+        f"learner: gpu {max(0, remaining['gpu'])} cpu {max(0, remaining['cpu'])} memory {max(0, remaining['memory'])}"
+    ]
     for opp in opponents:
-        parts.append(f"{opp}: gpu {target_opp} cpu {target_opp} memory {target_opp}")
+        oa = opponent_allocs[opp]
+        parts.append(f"{opp}: gpu {oa['gpu']} cpu {oa['cpu']} memory {oa['memory']}")
+
+    proxy_utils = {
+        opp: _utility_from_allocation(opponent_allocs[opp], opponent_weights, total_pool)
+        for opp in opponents
+    }
+    print(f"Opponent utilities: {proxy_utils} (target={TARGET_OPP_UTILITY})")
+    if any(u < TARGET_OPP_UTILITY for u in proxy_utils.values()):
+        print(
+            f"WARNING: target opponent utility {TARGET_OPP_UTILITY} infeasible with "
+            f"{len(opponents)} opponents and pool={pool_i}; using best-effort floors."
+        )
     return "PROPOSE: " + "; ".join(parts)
 
 
@@ -99,12 +140,97 @@ def baseline_policy(obs: Dict[str, Any], round_num: int) -> str:
 import random as _random
 
 _strategic_rng = _random.Random(42)
+MIN_GPU = 30
+MIN_CPU = 30
+MIN_MEMORY = 30
+TARGET_OPP_UTILITY = 5.0
+LEARNER_ACCEPT_UTILITY_THRESHOLD = 5.0
+
+
+def _utility_from_allocation(
+    allocation: Dict[str, float],
+    utility_vector: List[float],
+    total_pool: float,
+) -> float:
+    vec = [
+        float(allocation.get("gpu", 0.0)),
+        float(allocation.get("cpu", 0.0)),
+        float(allocation.get("memory", 0.0)),
+    ]
+    scaled = [max(0.0, min(v / max(total_pool, 1e-6), 1.0)) for v in vec]
+    return float(sum(v * w for v, w in zip(scaled, utility_vector)) * 15.0)
+
+
+def _greedy_target_allocation(
+    opponent_weights: List[float],
+    target_utility: float,
+    total_pool: int,
+    resource_caps: Dict[str, int],
+) -> Dict[str, int]:
+    """Greedy +1 allocator based on highest-weight resource."""
+    alloc = {"gpu": 0, "cpu": 0, "memory": 0}
+    resources = ["gpu", "cpu", "memory"]
+    while _utility_from_allocation(alloc, opponent_weights, float(total_pool)) < target_utility:
+        best_idx = max(range(len(opponent_weights)), key=lambda i: opponent_weights[i])
+        best_resource = resources[best_idx]
+        if alloc[best_resource] >= resource_caps.get(best_resource, 0):
+            feasible = [r for r in resources if alloc[r] < resource_caps.get(r, 0)]
+            if not feasible:
+                break
+            best_resource = max(feasible, key=lambda r: opponent_weights[resources.index(r)])
+        alloc[best_resource] += 1
+    return alloc
+
+
+def _parse_proposal_text(proposal_text: str) -> Dict[str, Dict[str, float]]:
+    parsed: Dict[str, Dict[str, float]] = {}
+    for chunk in [c.strip() for c in proposal_text.split(";") if c.strip()]:
+        if ":" not in chunk:
+            continue
+        aid, body = chunk.split(":", 1)
+        toks = body.strip().split()
+        alloc: Dict[str, float] = {}
+        for i in range(0, len(toks) - 1, 2):
+            k = toks[i].lower()
+            if k in {"gpu", "cpu", "memory"}:
+                try:
+                    alloc[k] = float(toks[i + 1])
+                except ValueError:
+                    alloc[k] = 0.0
+        if len(alloc) == 3:
+            parsed[aid.strip().lower()] = alloc
+    return parsed
+
+
+def _all_opponents_accepted(history: List[str], opponent_ids: List[str]) -> bool:
+    statuses = _recent_opponent_status(history, opponent_ids)
+    return bool(opponent_ids) and all(statuses.get(opp) == "accept" for opp in opponent_ids)
+
+
+def _build_consensus_opponent_first_action(
+    total_pool: float,
+    agent_ids: List[str],
+) -> str:
+    """Build a deterministic proposal maximizing broad opponent acceptability."""
+    opponents = [a for a in agent_ids if a != "learner"]
+    if not opponents:
+        return _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
+    pool_i = int(total_pool)
+    per_opp = pool_i // len(opponents)
+    rem = pool_i - (per_opp * len(opponents))
+    # Give equal resource shares to all opponents; learner gets small remainder.
+    learner = {"gpu": rem, "cpu": rem, "memory": rem}
+    parts = [f"learner: gpu {learner['gpu']} cpu {learner['cpu']} memory {learner['memory']}"]
+    for opp in opponents:
+        parts.append(f"{opp}: gpu {per_opp} cpu {per_opp} memory {per_opp}")
+    return "PROPOSE: " + "; ".join(parts)
 
 
 def _build_biased_proposal(
     learner_utility: List[float],
     learner_share_pct: float = 0.28,
     total_pool: float = 100.0,
+    agent_ids: Optional[List[str]] = None,
 ) -> str:
     """Build a proposal that gives MORE to opponents, biased by learner utility.
 
@@ -122,6 +248,8 @@ def _build_biased_proposal(
     """
     resources = ["gpu", "cpu", "memory"]
     pool = int(total_pool)
+    agents = list(agent_ids or build_agent_ids(2))
+    opponents = [a for a in agents if a != "learner"]
 
     # Learner keeps more of what it values, less of what it doesn't
     learner_alloc = {}
@@ -132,23 +260,26 @@ def _build_biased_proposal(
         share = max(5, min(share, pool - 10))  # Clamp to [5, pool-10]
         learner_alloc[res] = share
 
-    # Split remainder between opponents with some noise
-    opp1_alloc = {}
-    opp2_alloc = {}
+    # Split remainder between opponents with noise (dynamic-N)
+    opp_allocs: Dict[str, Dict[str, int]] = {opp: {} for opp in opponents}
     for res in resources:
         remaining = pool - learner_alloc[res]
-        # Add randomness to opponent split (40-60% to each)
-        split_ratio = _strategic_rng.uniform(0.40, 0.60)
-        opp1_share = int(remaining * split_ratio)
-        opp2_share = remaining - opp1_share
-        opp1_alloc[res] = opp1_share
-        opp2_alloc[res] = opp2_share
+        if not opponents:
+            continue
+        weights = [_strategic_rng.uniform(0.8, 1.2) for _ in opponents]
+        total_w = sum(weights)
+        shares = [int(remaining * (w / total_w)) for w in weights]
+        rem = remaining - sum(shares)
+        for i in range(rem):
+            shares[i % len(shares)] += 1
+        for i, opp in enumerate(opponents):
+            opp_allocs[opp][res] = shares[i]
 
-    parts = [
-        f"learner: gpu {learner_alloc['gpu']} cpu {learner_alloc['cpu']} memory {learner_alloc['memory']}",
-        f"opponent_1: gpu {opp1_alloc['gpu']} cpu {opp1_alloc['cpu']} memory {opp1_alloc['memory']}",
-        f"opponent_2: gpu {opp2_alloc['gpu']} cpu {opp2_alloc['cpu']} memory {opp2_alloc['memory']}",
-    ]
+    parts = [f"learner: gpu {learner_alloc['gpu']} cpu {learner_alloc['cpu']} memory {learner_alloc['memory']}"]
+    for opp in opponents:
+        parts.append(
+            f"{opp}: gpu {opp_allocs[opp]['gpu']} cpu {opp_allocs[opp]['cpu']} memory {opp_allocs[opp]['memory']}"
+        )
     return "PROPOSE: " + "; ".join(parts)
 
 
@@ -157,6 +288,7 @@ def _build_concession_proposal(
     round_num: int,
     history: List[str],
     total_pool: float = 100.0,
+    agent_ids: Optional[List[str]] = None,
 ) -> str:
     """Build progressively more generous proposals as rounds increase.
 
@@ -174,6 +306,8 @@ def _build_concession_proposal(
     """
     resources = ["gpu", "cpu", "memory"]
     pool = int(total_pool)
+    agents = list(agent_ids or build_agent_ids(2))
+    opponents = [a for a in agents if a != "learner"]
 
     # Concession rate increases with rounds
     concession = min(0.08 * round_num, 0.40)  # Max 40% concession
@@ -195,20 +329,26 @@ def _build_concession_proposal(
             share = int(pool * max(0.10, learner_base_pct - 0.10))
         learner_alloc[res] = max(5, min(share, pool - 10))
 
-    # Split remainder with randomness
-    opp1_alloc = {}
-    opp2_alloc = {}
+    # Split remainder with randomness across all opponents
+    opp_allocs: Dict[str, Dict[str, int]] = {opp: {} for opp in opponents}
     for res in resources:
         remaining = pool - learner_alloc[res]
-        split = _strategic_rng.uniform(0.42, 0.58)
-        opp1_alloc[res] = int(remaining * split)
-        opp2_alloc[res] = remaining - opp1_alloc[res]
+        if not opponents:
+            continue
+        weights = [_strategic_rng.uniform(0.8, 1.2) for _ in opponents]
+        total_w = sum(weights)
+        shares = [int(remaining * (w / total_w)) for w in weights]
+        rem = remaining - sum(shares)
+        for i in range(rem):
+            shares[i % len(shares)] += 1
+        for i, opp in enumerate(opponents):
+            opp_allocs[opp][res] = shares[i]
 
-    parts = [
-        f"learner: gpu {learner_alloc['gpu']} cpu {learner_alloc['cpu']} memory {learner_alloc['memory']}",
-        f"opponent_1: gpu {opp1_alloc['gpu']} cpu {opp1_alloc['cpu']} memory {opp1_alloc['memory']}",
-        f"opponent_2: gpu {opp2_alloc['gpu']} cpu {opp2_alloc['cpu']} memory {opp2_alloc['memory']}",
-    ]
+    parts = [f"learner: gpu {learner_alloc['gpu']} cpu {learner_alloc['cpu']} memory {learner_alloc['memory']}"]
+    for opp in opponents:
+        parts.append(
+            f"{opp}: gpu {opp_allocs[opp]['gpu']} cpu {opp_allocs[opp]['cpu']} memory {opp_allocs[opp]['memory']}"
+        )
     return "PROPOSE: " + "; ".join(parts)
 
 
@@ -230,16 +370,33 @@ def strategic_baseline_policy(obs: Dict[str, Any], round_num: int) -> str:
     """
     history = obs.get("conversation_history", [])
     utility = obs.get("private_utility", [0.33, 0.33, 0.34])
+    agent_ids = obs.get("agent_ids", build_agent_ids(2))
+    total_pool = float(obs.get("total_pool", 100.0))
+    opponents = [a for a in agent_ids if a != "learner"]
+
+    # For 3+ opponents, use the utility-aware deterministic allocator to avoid
+    # oscillatory random concessions that fail hard-threshold acceptance.
+    if len(opponents) >= 3:
+        if round_num == 1:
+            return _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
+        return _build_consensus_opponent_first_action(total_pool=total_pool, agent_ids=agent_ids)
 
     if round_num == 1:
-        return _build_biased_proposal(utility, learner_share_pct=0.28)
+        return _build_biased_proposal(
+            utility, learner_share_pct=0.28, total_pool=total_pool, agent_ids=agent_ids
+        )
 
-    # If any opponent accepted, accept too
-    if any("accept" in turn.lower() for turn in history if not turn.startswith("learner")):
-        return "ACCEPT: YES"
+    if _all_opponents_accepted(history, opponents):
+        parsed = _parse_proposal_text(str(obs.get("last_proposal", "")))
+        learner_alloc = parsed.get("learner", {})
+        learner_util = _utility_from_allocation(learner_alloc, utility, total_pool)
+        if learner_util >= LEARNER_ACCEPT_UTILITY_THRESHOLD:
+            return "ACCEPT: YES"
 
     # Progressive concession
-    return _build_concession_proposal(utility, round_num, history)
+    return _build_concession_proposal(
+        utility, round_num, history, total_pool=total_pool, agent_ids=agent_ids
+    )
 
 
 def _build_prompt_from_obs(
@@ -255,108 +412,34 @@ def _build_prompt_from_obs(
         remaining_pool=obs["remaining_compute_pool"],
         rounds_remaining=rounds_remaining,
         difficulty=difficulty,
-        agent_ids=obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"]),
+        agent_ids=obs.get("agent_ids", build_agent_ids(2)),
     )
 
 
 def _shift_toward_opponents(action: str, shift: int = 2) -> str:
     """Concede a small amount from learner to each opponent per resource."""
-    if not action.lower().startswith("propose:"):
-        return action
-    pattern = re.compile(
-        r"(learner|opponent_1|opponent_2)\s*:\s*gpu\s*(\d+(?:\.\d+)?)\s*cpu\s*(\d+(?:\.\d+)?)\s*memory\s*(\d+(?:\.\d+)?)",
-        re.IGNORECASE,
-    )
-    matches = pattern.findall(action)
-    if len(matches) < 3:
-        return action
-
-    alloc: Dict[str, Dict[str, int]] = {}
-    for agent, gpu, cpu, memory in matches[:3]:
-        alloc[agent.lower()] = {
-            "gpu": int(float(gpu)),
-            "cpu": int(float(cpu)),
-            "memory": int(float(memory)),
-        }
-
-    if any(a not in alloc for a in ("learner", "opponent_1", "opponent_2")):
-        return action
-
-    for res in ("gpu", "cpu", "memory"):
-        take = min(2 * shift, alloc["learner"][res])
-        if take <= 0:
-            continue
-        alloc["learner"][res] -= take
-        alloc["opponent_1"][res] += take // 2
-        alloc["opponent_2"][res] += take - (take // 2)
-
-    adapted = (
-        "PROPOSE: "
-        f"learner: gpu {alloc['learner']['gpu']} cpu {alloc['learner']['cpu']} memory {alloc['learner']['memory']}; "
-        f"opponent_1: gpu {alloc['opponent_1']['gpu']} cpu {alloc['opponent_1']['cpu']} memory {alloc['opponent_1']['memory']}; "
-        f"opponent_2: gpu {alloc['opponent_2']['gpu']} cpu {alloc['opponent_2']['cpu']} memory {alloc['opponent_2']['memory']}"
-    )
-    return validate_and_fix_proposal(adapted)
+    return action
 
 
-def _recent_opponent_status(history: List[str]) -> Dict[str, str]:
+def _recent_opponent_status(history: List[str], opponent_ids: List[str]) -> Dict[str, str]:
     """Return latest acceptance status for each opponent from history."""
-    status = {"opponent_1": "unknown", "opponent_2": "unknown"}
+    status = {opp: "unknown" for opp in opponent_ids}
     for turn in reversed(history):
         lower = turn.lower()
-        if lower.startswith("opponent_1:") and status["opponent_1"] == "unknown":
-            if "accept" in lower and "reject" not in lower:
-                status["opponent_1"] = "accept"
-            elif "reject" in lower:
-                status["opponent_1"] = "reject"
-        elif lower.startswith("opponent_2:") and status["opponent_2"] == "unknown":
-            if "accept" in lower and "reject" not in lower:
-                status["opponent_2"] = "accept"
-            elif "reject" in lower:
-                status["opponent_2"] = "reject"
-        if status["opponent_1"] != "unknown" and status["opponent_2"] != "unknown":
+        for opp in opponent_ids:
+            if lower.startswith(f"{opp}:") and status[opp] == "unknown":
+                if "accept" in lower and "reject" not in lower:
+                    status[opp] = "accept"
+                elif "reject" in lower:
+                    status[opp] = "reject"
+        if all(v != "unknown" for v in status.values()):
             break
     return status
 
 
 def _concede_to_rejecting_opponent(action: str, rejecting_opponent: str, shift: int = 3) -> str:
     """Increase rejecting opponent allocation by taking from learner and other opponent."""
-    if not action.lower().startswith("propose:"):
-        return action
-    pattern = re.compile(
-        r"(learner|opponent_1|opponent_2)\s*:\s*gpu\s*(\d+(?:\.\d+)?)\s*cpu\s*(\d+(?:\.\d+)?)\s*memory\s*(\d+(?:\.\d+)?)",
-        re.IGNORECASE,
-    )
-    matches = pattern.findall(action)
-    if len(matches) < 3:
-        return action
-
-    alloc: Dict[str, Dict[str, int]] = {}
-    for agent, gpu, cpu, memory in matches[:3]:
-        alloc[agent.lower()] = {
-            "gpu": int(float(gpu)),
-            "cpu": int(float(cpu)),
-            "memory": int(float(memory)),
-        }
-    if any(a not in alloc for a in ("learner", "opponent_1", "opponent_2")):
-        return action
-
-    other = "opponent_2" if rejecting_opponent == "opponent_1" else "opponent_1"
-    for res in ("gpu", "cpu", "memory"):
-        take_from_learner = min(shift, alloc["learner"][res])
-        take_from_other = min(max(1, shift // 2), alloc[other][res])
-        gain = take_from_learner + take_from_other
-        alloc["learner"][res] -= take_from_learner
-        alloc[other][res] -= take_from_other
-        alloc[rejecting_opponent][res] += gain
-
-    adapted = (
-        "PROPOSE: "
-        f"learner: gpu {alloc['learner']['gpu']} cpu {alloc['learner']['cpu']} memory {alloc['learner']['memory']}; "
-        f"opponent_1: gpu {alloc['opponent_1']['gpu']} cpu {alloc['opponent_1']['cpu']} memory {alloc['opponent_1']['memory']}; "
-        f"opponent_2: gpu {alloc['opponent_2']['gpu']} cpu {alloc['opponent_2']['cpu']} memory {alloc['opponent_2']['memory']}"
-    )
-    return validate_and_fix_proposal(adapted)
+    return action
 
 
 def make_model_policy(model, tokenizer, difficulty: str, max_rounds: int) -> Callable[[Dict[str, Any], int], str]:
@@ -366,7 +449,7 @@ def make_model_policy(model, tokenizer, difficulty: str, max_rounds: int) -> Cal
 
     def _policy(obs: Dict[str, Any], round_num: int) -> str:
         nonlocal last_raw_output
-        agent_ids = tuple(obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"]))
+        agent_ids = tuple(obs.get("agent_ids", build_agent_ids(2)))
         resource_keys = tuple(obs.get("resource_keys", ["gpu", "cpu", "memory"]))
         total_pool = int(float(obs.get("total_pool", 100.0)))
 
@@ -437,43 +520,47 @@ def make_model_policy(model, tokenizer, difficulty: str, max_rounds: int) -> Cal
                     print(f"REGENERATED VALID PROPOSAL [R{round_num}] on attempt {attempt + 1}")
                     break
             if not regenerated:
-                # Make fallback explicit and deterministic; env will also penalize fallback use.
-                action = validate_and_fix_proposal(
-                    _build_equal_split_action(total_pool=float(total_pool), agent_ids=list(agent_ids)),
-                    total_pool=total_pool,
-                    agent_ids=agent_ids,
-                    resource_keys=resource_keys,
+                raise ValueError(
+                    f"Failed to generate valid proposal with all agents after retries at round {round_num}. "
+                    f"expected_agents={list(agent_ids)}"
                 )
-                print(f"FORCED FALLBACK PROPOSAL [R{round_num}] -> {action}")
         history = obs.get("conversation_history", [])
-        opp_status = _recent_opponent_status(history)
+        opponent_ids = [a for a in agent_ids if a != "learner"]
+        opp_status = _recent_opponent_status(history, opponent_ids)
         last_response = str(obs.get("last_opponent_response", "")).lower()
         last_proposal = str(obs.get("last_proposal", ""))
         threshold = 4.0 if difficulty == "easy" else 5.0
-        all_accepted = opp_status["opponent_1"] == "accept" and opp_status["opponent_2"] == "accept"
+        all_accepted = opponent_ids and all(opp_status.get(opp) == "accept" for opp in opponent_ids)
         opp_util_ok = float(obs.get("last_opponent_utility", 0.0)) >= threshold
         if action.upper().startswith("ACCEPT: YES") and not (all_accepted or opp_util_ok):
             # Invalid accept is blocked: must propose a better deal.
             fallback = last_proposal if isinstance(last_proposal, str) else ""
             if fallback:
-                action = validate_and_fix_proposal(f"PROPOSE: {fallback}")
+                action = validate_and_fix_proposal(
+                    f"PROPOSE: {fallback}",
+                    total_pool=total_pool,
+                    agent_ids=agent_ids,
+                    resource_keys=resource_keys,
+                )
             else:
-                action = _build_equal_split_action()
+                action = _build_equal_split_action(total_pool=float(total_pool), agent_ids=list(agent_ids))
             print(f"BLOCKED INVALID ACCEPT [R{round_num}] -> {action}")
 
         repeated = action.lower().startswith("propose:") and last_proposal and action.replace("PROPOSE: ", "").strip() == last_proposal.strip()
         if last_response in {"rejected", "partial_accept", "repeated_proposal"} or repeated:
-            rejecting = None
-            if opp_status["opponent_1"] == "reject":
-                rejecting = "opponent_1"
-            elif opp_status["opponent_2"] == "reject":
-                rejecting = "opponent_2"
-            if rejecting:
-                action = _concede_to_rejecting_opponent(action, rejecting, shift=2 + min(round_num // 2, 3))
-                print(f"ADAPTED ACTION [R{round_num}] targeted to {rejecting}: {action}")
-            else:
-                action = _shift_toward_opponents(action, shift=1 + min(round_num // 2, 3))
-                print(f"ADAPTED ACTION [R{round_num}] after rejection/repetition: {action}")
+            # For dynamic-N settings, prefer a deterministic concession profile.
+            action = baseline_policy(obs, round_num + 1)
+            print(f"ADAPTED ACTION [R{round_num}] dynamic concession: {action}")
+
+        if action.lower().startswith("propose:"):
+            expected_agents = list(agent_ids)
+            generated_agents = []
+            body = re.sub(r"^PROPOSE\s*:\s*", "", action, flags=re.IGNORECASE)
+            for chunk in [c.strip() for c in body.split(";") if c.strip()]:
+                if ":" in chunk:
+                    generated_agents.append(chunk.split(":", 1)[0].strip().lower())
+            print(f"EXPECTED AGENTS: {expected_agents}")
+            print(f"GENERATED AGENTS: {generated_agents}")
         return action
 
     return _policy
