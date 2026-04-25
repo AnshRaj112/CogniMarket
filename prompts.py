@@ -8,7 +8,7 @@ Three prompts are provided:
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 
 def build_opponent_prompt(
@@ -16,6 +16,7 @@ def build_opponent_prompt(
     utility_vector: List[float],
     conversation_history: List[str],
     remaining_pool: Dict[str, float],
+    agent_ids: Sequence[str] | None = None,
 ) -> str:
     """Return a system prompt for an LLM-based opponent.
 
@@ -23,11 +24,12 @@ def build_opponent_prompt(
     current state of negotiations, and encourages strategic but fair play.
 
     Args:
-        agent_id: One of "opponent_1" or "opponent_2".
+        agent_id: Agent identifier for the current opponent.
         utility_vector: Private utility weights [gpu_weight, cpu_weight, memory_weight].
             Values are non-negative and sum to 1.
         conversation_history: Recent turns of public conversation, newest last.
         remaining_pool: Remaining unallocated resources per type.
+        agent_ids: Full list of participating agent IDs.
 
     Returns:
         A formatted system-prompt string ready to send to an LLM.
@@ -40,11 +42,20 @@ def build_opponent_prompt(
         f"Memory: {remaining_pool.get('memory', 100):.1f}"
     )
 
+    all_agent_ids = list(agent_ids) if agent_ids else ["learner", "opponent_1", "opponent_2"]
+    if agent_id not in all_agent_ids:
+        all_agent_ids.append(agent_id)
+    other_agents = [a for a in all_agent_ids if a != agent_id]
+    all_agents_str = ", ".join(all_agent_ids)
+    proposal_example = "; ".join(
+        f"{aid}: gpu <N> cpu <N> memory <N>" for aid in all_agent_ids
+    )
+
     return f"""You are {agent_id}, a strategic compute resource negotiator in the Compute Allocation Bazaar.
 
 == Your Private Utility Preferences ==
 You care about three resources: GPU, CPU, and Memory.
-Your personal utility weights (private — do NOT reveal these exactly):
+Your personal utility weights (private  do NOT reveal these exactly):
   GPU importance:    {gpu_w:.3f}
   CPU importance:    {cpu_w:.3f}
   Memory importance: {mem_w:.3f}
@@ -53,13 +64,14 @@ These weights mean you prefer larger shares of resources with higher weights.
 Your goal is to maximize your own utility (dot product of your allocation fraction and these weights).
 
 == Negotiation Rules ==
-- There are three agents: you ({agent_id}), learner, and the third opponent.
+- Participating agents: {all_agents_str}.
+- You are {agent_id}; other agents are: {", ".join(other_agents) if other_agents else "(none)"}.
 - Total compute pool: 100 units of each resource (GPU, CPU, Memory).
-- Each proposal must specify allocations for ALL THREE agents that fit within the pool.
+- Each proposal must specify allocations for ALL agents that fit within the pool.
 - Proposals use the format:
-    learner: gpu <N> cpu <N> memory <N>; opponent_1: gpu <N> cpu <N> memory <N>; opponent_2: gpu <N> cpu <N> memory <N>
+    {proposal_example}
 - You may: accept a proposal, reject it, make a counter-proposal, or send a strategic message.
-- A deal closes when ALL THREE agents accept the SAME proposal.
+- A deal closes when ALL agents accept the SAME proposal.
 
 == Current State ==
 Remaining unallocated pool: {pool_str}
@@ -71,7 +83,7 @@ Remaining unallocated pool: {pool_str}
 - Think strategically: push for a larger share of resources you care most about.
 - Be willing to accept slightly suboptimal deals if the alternative is no deal at all.
 - Reveal preferences only indirectly (e.g., say "I value GPU highly" but do not share exact weights).
-- Keep messages concise (1–3 sentences) and negotiation-focused.
+- Keep messages concise (13 sentences) and negotiation-focused.
 - If rounds are running out, be more willing to compromise to close a deal.
 
 Respond with exactly one action: a proposal, acceptance, rejection, counter-offer, or a short strategic message."""
@@ -90,7 +102,7 @@ def build_oversight_prompt(
     Args:
         conversation_history: Full negotiation history.
         current_proposal: Active proposal allocation keyed by agent ID, or None.
-        utilities: All agents' private utility vectors (optional — full observability mode).
+        utilities: All agents' private utility vectors (optional  full observability mode).
 
     Returns:
         A formatted system-prompt string.
@@ -127,11 +139,11 @@ Your role is to observe the full negotiation and provide neutral, helpful commen
 == Current Proposal on the Table ==
 {proposal_text}
 
-When queried, provide a concise explanation (2–4 sentences) covering:
-- Whether the current proposal is feasible (total allocation ≤ 100 per resource).
+When queried, provide a concise explanation (24 sentences) covering:
+- Whether the current proposal is feasible (total allocation  100 per resource).
 - Which agent benefits most and why.
 - Whether the deal appears fair relative to stated or inferred preferences.
-- A recommendation (e.g., "Agent learner should push for more GPU" or "This deal looks efficient — suggest accepting").
+- A recommendation (e.g., "Agent learner should push for more GPU" or "This deal looks efficient  suggest accepting").
 
 Be neutral, factual, and helpful. Avoid advocating for any single agent's interests."""
 
@@ -142,6 +154,7 @@ def build_learner_hint(
     remaining_pool: Dict[str, float],
     rounds_remaining: int,
     difficulty: str = "hard",
+    agent_ids: Sequence[str] | None = None,
 ) -> str:
     """Return a concise context string to prepend to the learner agent's input.
 
@@ -170,6 +183,22 @@ def build_learner_hint(
     # --- Negotiation memory analysis (Component 4) ---
     strategy_hints = _build_strategy_hints(conversation_history, rounds_remaining, urgency)
 
+    all_agent_ids = list(agent_ids) if agent_ids else ["learner", "opponent_1", "opponent_2"]
+    proposal_template = "; ".join(
+        f"{aid}: gpu <N> cpu <N> memory <N>" for aid in all_agent_ids
+    )
+    agent_count = len(all_agent_ids)
+    opponent_ids = [a for a in all_agent_ids if a != "learner"]
+    num_opponents = len(opponent_ids)
+    base = 100 // max(agent_count, 1)
+    rem = 100 - (base * max(agent_count, 1))
+    shares = [base + (1 if i < rem else 0) for i in range(agent_count)]
+    example_parts = [
+        f"{aid}: gpu {shares[i]} cpu {shares[i]} memory {shares[i]}"
+        for i, aid in enumerate(all_agent_ids)
+    ]
+    example_proposal = "; ".join(example_parts)
+
     return f"""[SYSTEM: Compute Allocation Bazaar | difficulty={difficulty} | rounds_left={rounds_remaining} | urgency={urgency}]
 Your private utility weights: GPU={gpu_w:.3f}, CPU={cpu_w:.3f}, Memory={mem_w:.3f}
 Remaining pool: {pool_str}
@@ -177,16 +206,18 @@ Remaining pool: {pool_str}
 Recent conversation:
 {history_text}
 {strategy_hints}
+You are negotiating with {num_opponents} opponents: {", ".join(opponent_ids) if opponent_ids else "(none)"}.
+You MUST include all agents in every proposal.
 Produce a single negotiation action. You MUST use one of these two formats:
-1. PROPOSE: learner: gpu <N> cpu <N> memory <N>; opponent_1: gpu <N> cpu <N> memory <N>; opponent_2: gpu <N> cpu <N> memory <N>
+1. PROPOSE: {proposal_template}
 2. ACCEPT: YES (to accept current deal) or ACCEPT: NO (to reject/counter)
 
 CRITICAL RULES:
-- Each resource (gpu, cpu, memory) must sum to EXACTLY 100 across all three agents.
+- Each resource (gpu, cpu, memory) must sum to EXACTLY 100 across all listed agents.
 - Do NOT repeat the same proposal. If rejected, change the allocation.
 - Output ONLY the action line. No explanations.
 
-Example: PROPOSE: learner: gpu 40 cpu 30 memory 30; opponent_1: gpu 30 cpu 40 memory 30; opponent_2: gpu 30 cpu 30 memory 40"""
+Example: PROPOSE: {example_proposal}"""
 
 
 def _build_strategy_hints(

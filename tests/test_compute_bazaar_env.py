@@ -1,9 +1,16 @@
 import unittest
 
-from compute_bazaar_env import ComputeBazaarEnv
+from compute_bazaar_env import ComputeBazaarEnv, build_agent_ids
 
 
 class TestComputeBazaarEnv(unittest.TestCase):
+    def test_build_agent_ids_dynamic_count(self):
+        self.assertEqual(build_agent_ids(1), ["learner", "opponent_1"])
+        self.assertEqual(
+            build_agent_ids(4),
+            ["learner", "opponent_1", "opponent_2", "opponent_3", "opponent_4"],
+        )
+
     def test_reset_returns_expected_observation_shape(self):
         env = ComputeBazaarEnv(seed=7)
         obs, info = env.reset(options={"difficulty": "easy"})
@@ -49,7 +56,9 @@ class TestComputeBazaarEnv(unittest.TestCase):
         env.step(proposal)
         _, reward, terminated, _, info = env.step(proposal)
         self.assertFalse(terminated)
-        self.assertLessEqual(reward, -3.0)
+        # Reward shaping now includes partial-agreement credit with decayed penalties,
+        # so repeated proposals should remain negative but not necessarily <= -3.0.
+        self.assertLessEqual(reward, -0.1)
         self.assertEqual(info.get("success"), False)
 
 

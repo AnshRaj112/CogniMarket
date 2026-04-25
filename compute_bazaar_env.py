@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 import re
 import os
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -52,6 +53,13 @@ SPARSE_BONUS_THRESHOLD = 0.85
 EASY_ACCEPTANCE_THRESHOLD = 4.0
 HARD_ACCEPTANCE_THRESHOLD = 5.0
 MIN_UTILITY_VALUE = 0.001
+
+
+def build_agent_ids(num_opponents: int) -> List[str]:
+    """Return canonical agent IDs for learner + N opponents."""
+    if num_opponents < 1:
+        raise ValueError("num_opponents must be >= 1")
+    return ["learner"] + [f"opponent_{i + 1}" for i in range(num_opponents)]
 
 # ---------------------------------------------------------------------------
 # Agent name aliases → canonical names (FIX #5)
@@ -133,7 +141,67 @@ def clean_action(raw_output: str) -> str:
     return "ACCEPT: NO"
 
 
-def validate_and_fix_proposal(action: str, total_pool: int = 100) -> str:
+def _parse_proposal_structured(
+    proposal_text: str,
+    agent_ids: Tuple[str, ...],
+    resource_keys: Tuple[str, ...],
+) -> Optional[Dict[str, Dict[str, float]]]:
+    """Parse proposal text into structured allocation data without regex."""
+    allocations: Dict[str, Dict[str, float]] = {}
+    chunks = [chunk.strip() for chunk in proposal_text.split(";") if chunk.strip()]
+    for chunk in chunks:
+        if ":" not in chunk:
+            continue
+        agent_raw, body = chunk.split(":", 1)
+        agent = agent_raw.strip().lower()
+        if agent not in agent_ids:
+            continue
+
+        tokens = body.strip().split()
+        if len(tokens) % 2 != 0:
+            return None
+        parsed: Dict[str, float] = {}
+        for i in range(0, len(tokens), 2):
+            key = tokens[i].strip().lower()
+            value_text = tokens[i + 1].strip()
+            if key not in resource_keys:
+                continue
+            try:
+                value = float(value_text)
+            except ValueError:
+                return None
+            parsed[key] = value
+        if set(parsed.keys()) != set(resource_keys):
+            return None
+        allocations[agent] = parsed
+
+    if set(allocations.keys()) != set(agent_ids):
+        return None
+    return allocations
+
+
+def proposal_has_all_agents(
+    action: str,
+    agent_ids: Tuple[str, ...] = AGENT_IDS,
+    resource_keys: Tuple[str, ...] = RESOURCE_KEYS,
+) -> bool:
+    """Return True when a PROPOSE action contains all required agents/resources."""
+    stripped = action.strip()
+    if not re.match(r"^PROPOSE\s*:", stripped, re.IGNORECASE):
+        return False
+    proposal_body = re.sub(r"^PROPOSE\s*:\s*", "", stripped, flags=re.IGNORECASE)
+    parsed = _parse_proposal_structured(proposal_body, agent_ids, resource_keys)
+    if parsed is None:
+        return False
+    return all(v >= 0.0 for a in parsed.values() for v in a.values())
+
+
+def validate_and_fix_proposal_with_meta(
+    action: str,
+    total_pool: int = 100,
+    agent_ids: Tuple[str, ...] = AGENT_IDS,
+    resource_keys: Tuple[str, ...] = RESOURCE_KEYS,
+) -> Tuple[str, bool]:
     """Validate a PROPOSE action and fix resource totals if needed (FIX #4).
 
     If the action is ACCEPT, passes through unchanged.
@@ -151,59 +219,34 @@ def validate_and_fix_proposal(action: str, total_pool: int = 100) -> str:
 
     # Pass through ACCEPT unchanged
     if re.match(r"^ACCEPT\s*:", stripped, re.IGNORECASE):
-        return stripped
+        return stripped, False
 
     # Must be PROPOSE
     if not re.match(r"^PROPOSE\s*:", stripped, re.IGNORECASE):
         print(f"DEBUG [validate_proposal]: Not ACCEPT or PROPOSE, returning fallback")
-        return _safe_fallback_proposal(total_pool)
+        return _safe_fallback_proposal(total_pool, agent_ids, resource_keys), True
 
     proposal_body = re.sub(r"^PROPOSE\s*:\s*", "", stripped, flags=re.IGNORECASE)
 
-    # Parse agent allocations
-    agent_pattern = re.compile(
-        r"(learner|opponent_1|opponent_2)\s*:\s*gpu\s*(\d+(?:\.\d+)?)\s*cpu\s*(\d+(?:\.\d+)?)\s*memory\s*(\d+(?:\.\d+)?)",
-        re.IGNORECASE,
-    )
-    matches = agent_pattern.findall(proposal_body)
-
-    if len(matches) < 3:
-        print(f"DEBUG [validate_proposal]: Only {len(matches)} agents parsed (need 3), using fallback")
-        print(f"DEBUG [validate_proposal]: Proposal body was: {proposal_body[:120]}")
-        return _safe_fallback_proposal(total_pool)
-
-    matched_agents = {m[0].lower() for m in matches}
-    required = {"learner", "opponent_1", "opponent_2"}
-    if matched_agents != required:
-        print(f"DEBUG [validate_proposal]: Agent mismatch: got {matched_agents}, need {required}, using fallback")
-        return _safe_fallback_proposal(total_pool)
-
-    # Build raw allocation dict
-    alloc: Dict[str, Dict[str, float]] = {}
-    for agent, gpu, cpu, memory in matches[:3]:
-        agent = agent.lower()
-        try:
-            alloc[agent] = {"gpu": float(gpu), "cpu": float(cpu), "memory": float(memory)}
-        except ValueError:
-            print(f"DEBUG [validate_proposal]: Non-numeric value for {agent}, using fallback")
-            return _safe_fallback_proposal(total_pool)
-
-        if any(v < 0 for v in alloc[agent].values()):
-            print(f"DEBUG [validate_proposal]: Negative value for {agent}, using fallback")
-            return _safe_fallback_proposal(total_pool)
+    alloc = _parse_proposal_structured(proposal_body, agent_ids, resource_keys)
+    if alloc is None:
+        print("DEBUG [validate_proposal]: Structured parse failed, using fallback")
+        return _safe_fallback_proposal(total_pool, agent_ids, resource_keys), True
+    if any(value < 0.0 for a in alloc.values() for value in a.values()):
+        print("DEBUG [validate_proposal]: Negative value detected, using fallback")
+        return _safe_fallback_proposal(total_pool, agent_ids, resource_keys), True
 
     # Normalize each resource to sum to EXACTLY total_pool using largest-remainder
-    agents = list(required)  # stable order
-    agents.sort()  # deterministic: learner, opponent_1, opponent_2
+    agents = list(agent_ids)
     int_alloc: Dict[str, Dict[str, int]] = {a: {} for a in agents}
 
-    for res in RESOURCE_KEYS:
+    for res in resource_keys:
         raw_vals = {a: alloc[a][res] for a in agents}
         raw_total = sum(raw_vals.values())
 
         if raw_total == 0:
-            base = total_pool // 3
-            rem = total_pool - base * 3
+            base = total_pool // len(agents)
+            rem = total_pool - base * len(agents)
             for i, a in enumerate(agents):
                 int_alloc[a][res] = base + (1 if i < rem else 0)
         else:
@@ -222,36 +265,57 @@ def validate_and_fix_proposal(action: str, total_pool: int = 100) -> str:
                 print(f"DEBUG [validate_proposal]: Normalized {res}: {raw_total:.1f} -> {total_pool}")
 
     # Verify sums
-    for res in RESOURCE_KEYS:
+    for res in resource_keys:
         res_sum = sum(int_alloc[a][res] for a in agents)
         assert res_sum == total_pool, f"BUG: {res} sum is {res_sum}, expected {total_pool}"
 
     # Build clean output
     parts = []
-    for agent in ("learner", "opponent_1", "opponent_2"):
+    for agent in agent_ids:
         a = int_alloc[agent]
-        parts.append(f"{agent}: gpu {a['gpu']} cpu {a['cpu']} memory {a['memory']}")
+        segments = [f"{rk} {a[rk]}" for rk in resource_keys]
+        parts.append(f"{agent}: " + " ".join(segments))
 
     result = "PROPOSE: " + "; ".join(parts)
     print(
         f"DEBUG [validate_proposal]: Valid proposal | "
-        f"gpu={[int_alloc[a]['gpu'] for a in ('learner', 'opponent_1', 'opponent_2')]} "
-        f"cpu={[int_alloc[a]['cpu'] for a in ('learner', 'opponent_1', 'opponent_2')]} "
-        f"mem={[int_alloc[a]['memory'] for a in ('learner', 'opponent_1', 'opponent_2')]}"
+        f"agents={agent_ids} "
+        f"resources={resource_keys}"
     )
-    return result
+    return result, False
 
 
-def _safe_fallback_proposal(total_pool: int = 100) -> str:
+def validate_and_fix_proposal(
+    action: str,
+    total_pool: int = 100,
+    agent_ids: Tuple[str, ...] = AGENT_IDS,
+    resource_keys: Tuple[str, ...] = RESOURCE_KEYS,
+) -> str:
+    """Backward-compatible wrapper that returns only the normalized action."""
+    fixed, _ = validate_and_fix_proposal_with_meta(
+        action=action,
+        total_pool=total_pool,
+        agent_ids=agent_ids,
+        resource_keys=resource_keys,
+    )
+    return fixed
+
+
+def _safe_fallback_proposal(
+    total_pool: int = 100,
+    agent_ids: Tuple[str, ...] = AGENT_IDS,
+    resource_keys: Tuple[str, ...] = RESOURCE_KEYS,
+) -> str:
     """Return a safe equal-split proposal as fallback (FIX #4)."""
-    base = total_pool // 3
-    rem = total_pool - base * 3
-    shares = [base + (1 if i < rem else 0) for i in range(3)]
-    result = (
-        f"PROPOSE: learner: gpu {shares[0]} cpu {shares[0]} memory {shares[0]}; "
-        f"opponent_1: gpu {shares[1]} cpu {shares[1]} memory {shares[1]}; "
-        f"opponent_2: gpu {shares[2]} cpu {shares[2]} memory {shares[2]}"
-    )
+    base = total_pool // len(agent_ids)
+    rem = total_pool - base * len(agent_ids)
+    shares = [base + (1 if i < rem else 0) for i in range(len(agent_ids))]
+    parts = []
+    for i, agent in enumerate(agent_ids):
+        parts.append(
+            f"{agent}: " + " ".join(f"{rk} {shares[i]}" for rk in resource_keys)
+        )
+    result = "PROPOSE: " + "; ".join(parts)
     print(f"DEBUG [validate_proposal]: Using safe fallback proposal: {result}")
     return result
 
@@ -364,11 +428,20 @@ class ComputeBazaarEnv(_BaseEnv):
         self.rounds_used += 1
         round_penalty = ROUND_PENALTY
         reward = round_penalty
+        fallback_used = False
 
         # --- FIX #2, #3, #5: Clean, normalize, and extract single action ---
         action = clean_action(action)
-        if self.agent_ids == AGENT_IDS and self.resource_keys == RESOURCE_KEYS:
-            action = validate_and_fix_proposal(action, int(self.total_pool))
+        if action.lower().startswith("propose:"):
+            action, fallback_used = validate_and_fix_proposal_with_meta(
+                action,
+                int(self.total_pool),
+                self.agent_ids,
+                self.resource_keys,
+            )
+        if fallback_used:
+            # Explicitly penalize malformed proposals; no more silent fallback.
+            reward -= 5.0
 
         action_type, parsed_proposal = self._parse_action(action)
         prev_opp_utility = float(self._last_opponent_utility)
@@ -446,12 +519,24 @@ class ComputeBazaarEnv(_BaseEnv):
         threshold = EASY_ACCEPTANCE_THRESHOLD if self._difficulty == "easy" else HARD_ACCEPTANCE_THRESHOLD
         reward += 0.5 * (opponent_utility / max(threshold, 1e-6))
         if opponent_utility < threshold:
-            reward -= 1.5
+            # Multi-agent difficulty: soften hard threshold into decayed penalty.
+            deficit = max(0.0, threshold - opponent_utility)
+            decay = 1.0 / max(1.0, math.sqrt(len(self.opponent_ids)))
+            reward -= 1.5 * deficit / max(threshold, 1e-6) * decay
         reward += delta_opponent_utility
+        if self._deal is not None:
+            accepted_count = len(self._deal.accepted_by)
+            coalition_ratio = accepted_count / max(1, len(self.agent_ids))
+            # Partial-agreement shaping: reward convergence even before full closure.
+            reward += 2.0 * coalition_ratio
+            if 1 < accepted_count < len(self.agent_ids):
+                # Explicit coalition incentive for >=2 aligned agents.
+                reward += 1.0
         if success:
             reward += 10.0
         else:
-            reward -= 2.0
+            # With many agents, strict failure penalty is too harsh; decay it.
+            reward -= 2.0 / max(1.0, math.sqrt(len(self.agent_ids)))
             # Guardrail: rejected / non-terminal states should not end up net-positive.
             reward = min(reward, -0.1)
         if action_type == "accept" and not deal_closed:
@@ -480,6 +565,7 @@ class ComputeBazaarEnv(_BaseEnv):
             "oversight_queries": self._oversight_queries,
             "opponent_utility": round(opponent_utility, 4),
             "delta_opponent_utility": round(delta_opponent_utility, 4),
+            "fallback_used": fallback_used,
         }
         print(f"DEBUG [env.step R{self.rounds_used}]: reward={reward:.2f}, "
               f"terminated={self._terminated}, truncated={self._truncated}, "
@@ -491,6 +577,8 @@ class ComputeBazaarEnv(_BaseEnv):
             "conversation_history": self.history[-8:],
             "private_utility": self.utilities.get("learner", [0.0, 0.0, 0.0]),
             "remaining_compute_pool": self._remaining_pool(),
+            "agent_ids": list(self.agent_ids),
+            "resource_keys": list(self.resource_keys),
             "last_proposal": self._format_proposal(self._last_learner_proposal),
             "last_opponent_response": self._last_opponent_response,
             "last_opponent_utility": float(self._last_opponent_utility),
@@ -692,12 +780,13 @@ class ComputeBazaarEnv(_BaseEnv):
                         utility_vector=self.utilities[opponent],
                         conversation_history=self.history,
                         remaining_pool=self._remaining_pool(),
+                        agent_ids=self.agent_ids,
                     )
                     completion = client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
                         messages=[{"role": "system", "content": sys_prompt}],
                         temperature=0.7,
-                        max_tokens=64,
+                        max_tokens=512,
                     )
                     response_text = completion.choices[0].message.content.strip()
                     
@@ -741,7 +830,35 @@ class ComputeBazaarEnv(_BaseEnv):
                 print(f"DEBUG [_run_opponents]: {opponent} rule-reject (utility={utility:.2f} < {threshold}), "
                       f"accepted_by={self._deal.accepted_by}")
 
+    def get_opponent_personalities(self) -> Dict[str, str]:
+        """Infer opponent personalities from their utility weights."""
+        personalities = {}
+        for opp in self.opponent_ids:
+            weights = self.utilities.get(opp, [0.0, 0.0, 0.0])
+            max_idx = weights.index(max(weights))
+            resource = self.resource_keys[max_idx].upper()
+            trait = "Balanced"
+            if weights[max_idx] > 0.6:
+                trait = f"Obsessed with {resource}"
+            elif weights[max_idx] > 0.45:
+                trait = f"Prioritizes {resource}"
+            personalities[opp] = f"Needs: {resource} ({trait})"
+        return personalities
+
+    def get_utility_summary(self) -> Dict[str, float]:
+        """Return current utility scores for all agents."""
+        summary = {}
+        # Calculate learner utility relative to current deal or last learner proposal
+        prop = self._deal.proposal if self._deal else self._last_learner_proposal
+        for agent in self.agent_ids:
+            summary[agent] = self._calculate_utility(
+                allocation=prop.get(agent, {}) if prop else {},
+                utility_vector=self.utilities.get(agent, [0.0, 0.0, 0.0])
+            )
+        return summary
+
     def _calculate_utility(self, allocation: Dict[str, float], utility_vector: List[float]) -> float:
+
         """Compute scaled utility in [0, MAX_UTILITY_SCALE] using weighted resource value."""
         if not allocation:
             return 0.0
@@ -786,7 +903,7 @@ class ComputeBazaarEnv(_BaseEnv):
                     model="llama-3.3-70b-versatile",
                     messages=[{"role": "system", "content": sys_prompt}],
                     temperature=0.3,
-                    max_tokens=64,
+                    max_tokens=512,
                 )
                 return completion.choices[0].message.content.strip()
             except Exception:

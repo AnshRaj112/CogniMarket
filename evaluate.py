@@ -17,21 +17,30 @@ import re
 import statistics
 from typing import Any, Callable, Dict, List, Optional
 
-from compute_bazaar_env import ComputeBazaarEnv, clean_action, validate_and_fix_proposal
+from compute_bazaar_env import (
+    ComputeBazaarEnv,
+    build_agent_ids,
+    clean_action,
+    proposal_has_all_agents,
+    validate_and_fix_proposal,
+)
 
 
 # ---------------------------------------------------------------------------
 # Simple baseline policy (rule-based equal split)
 # ---------------------------------------------------------------------------
 
-def _build_equal_split_action(total_pool: float = 100.0) -> str:
+def _build_equal_split_action(
+    total_pool: float = 100.0,
+    agent_ids: Optional[List[str]] = None,
+) -> str:
     """Build an equal-split proposal string derived from the given pool size.
 
     Each agent receives ``floor(total_pool / 3)`` units per resource; the
     first ``total_pool % 3`` agents each receive one extra unit to ensure
     the pool is fully allocated.
     """
-    agents = ("learner", "opponent_1", "opponent_2")
+    agents = tuple(agent_ids or ["learner", "opponent_1", "opponent_2"])
     per_agent = int(total_pool) // len(agents)
     remainder = int(total_pool) % len(agents)
     parts = []
@@ -54,13 +63,16 @@ def baseline_policy(obs: Dict[str, Any], round_num: int) -> str:
     Returns:
         An action string.
     """
+    agent_ids = obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"])
+    total_pool = float(obs.get("remaining_compute_pool", {}).get("gpu", 100.0))
+    equal_split_action = _build_equal_split_action(total_pool=total_pool, agent_ids=agent_ids)
     if round_num == 1:
-        return _EQUAL_SPLIT_ACTION
+        return equal_split_action
     # If the deal exists in the history (any opponent said "accept"), mirror-accept.
     history = obs.get("conversation_history", [])
     if any("accept" in turn for turn in history if not turn.startswith("learner")):
         return "ACCEPT: YES"
-    return _EQUAL_SPLIT_ACTION
+    return equal_split_action
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +238,7 @@ def _build_prompt_from_obs(
         remaining_pool=obs["remaining_compute_pool"],
         rounds_remaining=rounds_remaining,
         difficulty=difficulty,
+        agent_ids=obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"]),
     )
 
 
@@ -336,6 +349,29 @@ def make_model_policy(model, tokenizer, difficulty: str, max_rounds: int) -> Cal
 
     def _policy(obs: Dict[str, Any], round_num: int) -> str:
         nonlocal last_raw_output
+        agent_ids = tuple(obs.get("agent_ids", ["learner", "opponent_1", "opponent_2"]))
+        resource_keys = tuple(obs.get("resource_keys", ["gpu", "cpu", "memory"]))
+        total_pool = int(float(obs.get("remaining_compute_pool", {}).get("gpu", 100.0)))
+
+        def _generate_once() -> str:
+            prompt_local = _build_prompt_from_obs(obs, round_num, difficulty, max_rounds)
+            inputs_local = tokenizer(prompt_local, return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                outputs_local = model.generate(
+                    **inputs_local,
+                    max_new_tokens=64,
+                    do_sample=True,
+                    temperature=0.8,
+                    top_p=0.9,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+            raw_local = tokenizer.decode(
+                outputs_local[0][inputs_local["input_ids"].shape[1]:],
+                skip_special_tokens=True,
+            ).strip()
+            print(f"MODEL OUTPUT [R{round_num}]: {repr(raw_local[:220])}")
+            return raw_local
+
         prompt = _build_prompt_from_obs(obs, round_num, difficulty, max_rounds)
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
         with torch.no_grad():
@@ -356,7 +392,42 @@ def make_model_policy(model, tokenizer, difficulty: str, max_rounds: int) -> Cal
             print(f"WARNING [R{round_num}]: model output repeated exactly from previous step.")
         last_raw_output = raw_text
 
-        action = validate_and_fix_proposal(clean_action(raw_text))
+        action = validate_and_fix_proposal(
+            clean_action(raw_text),
+            total_pool=total_pool,
+            agent_ids=agent_ids,
+            resource_keys=resource_keys,
+        )
+
+        # Strict validator: malformed proposals are regenerated before env.step().
+        if action.lower().startswith("propose:") and not proposal_has_all_agents(
+            action, agent_ids=agent_ids, resource_keys=resource_keys
+        ):
+            regenerated = False
+            for attempt in range(2):
+                regen_raw = _generate_once()
+                candidate = validate_and_fix_proposal(
+                    clean_action(regen_raw),
+                    total_pool=total_pool,
+                    agent_ids=agent_ids,
+                    resource_keys=resource_keys,
+                )
+                if proposal_has_all_agents(
+                    candidate, agent_ids=agent_ids, resource_keys=resource_keys
+                ):
+                    action = candidate
+                    regenerated = True
+                    print(f"REGENERATED VALID PROPOSAL [R{round_num}] on attempt {attempt + 1}")
+                    break
+            if not regenerated:
+                # Make fallback explicit and deterministic; env will also penalize fallback use.
+                action = validate_and_fix_proposal(
+                    _build_equal_split_action(total_pool=float(total_pool), agent_ids=list(agent_ids)),
+                    total_pool=total_pool,
+                    agent_ids=agent_ids,
+                    resource_keys=resource_keys,
+                )
+                print(f"FORCED FALLBACK PROPOSAL [R{round_num}] -> {action}")
         history = obs.get("conversation_history", [])
         opp_status = _recent_opponent_status(history)
         last_response = str(obs.get("last_opponent_response", "")).lower()
@@ -472,6 +543,7 @@ def run_rule_baseline_metrics(
     difficulty: str = "hard",
     max_rounds: int = 12,
     seed: int = 42,
+    num_opponents: int = 2,
 ) -> Dict[str, Any]:
     """Aggregate env metrics for :func:`baseline_policy` (fixed equal-split rule).
 
@@ -482,7 +554,11 @@ def run_rule_baseline_metrics(
         Dict with ``success_rate``, ``avg_reward``, ``avg_utility``, ``avg_rounds``,
         plus ``policy`` (short name string) for logging and plots.
     """
-    env = ComputeBazaarEnv(max_rounds=max_rounds, seed=seed)
+    env = ComputeBazaarEnv(
+        max_rounds=max_rounds,
+        seed=seed,
+        agent_ids=build_agent_ids(num_opponents),
+    )
     results: List[Dict[str, Any]] = []
     for ep in range(1, num_episodes + 1):
         metrics = run_episode(
@@ -509,6 +585,7 @@ def evaluate(
     seed: int | None = None,
     policy: Optional[Callable[[Dict[str, Any], int], str]] = None,
     policy_name: str = "strategic",
+    num_opponents: int = 2,
 ) -> None:
     """Run the full evaluation loop and print per-episode and aggregate stats.
 
@@ -518,7 +595,11 @@ def evaluate(
         max_rounds: Maximum rounds per episode.
         seed: Optional base seed; per-episode seeds are derived from it.
     """
-    env = ComputeBazaarEnv(max_rounds=max_rounds, seed=seed)
+    env = ComputeBazaarEnv(
+        max_rounds=max_rounds,
+        seed=seed,
+        agent_ids=build_agent_ids(num_opponents),
+    )
 
     results: List[Dict[str, Any]] = []
 
@@ -526,7 +607,10 @@ def evaluate(
 
     print(f"\n{'=' * 60}")
     print(f"  Compute Allocation Bazaar — Evaluation ({episodes} episodes)")
-    print(f"  Policy: {policy_name} | Difficulty: {difficulty} | max_rounds: {max_rounds}")
+    print(
+        f"  Policy: {policy_name} | Difficulty: {difficulty} | "
+        f"max_rounds: {max_rounds} | opponents: {num_opponents}"
+    )
     print(f"{'=' * 60}\n")
     print(f"{'Ep':>3}  {'Reward':>8}  {'Utility':>8}  {'Rounds':>6}  {'Success':>7}  {'EfficBonus':>10}  {'SparseBonus':>11}")
     print(f"{'-' * 60}")
@@ -574,6 +658,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-rounds", type=int, default=12, dest="max_rounds", help="Max rounds per episode.")
     parser.add_argument("--seed", type=int, default=None, help="Base random seed.")
     parser.add_argument(
+        "--num-opponents",
+        type=int,
+        default=2,
+        dest="num_opponents",
+        help="Number of opponents (learner + N opponents total agents).",
+    )
+    parser.add_argument(
         "--policy",
         choices=["baseline", "strategic", "model"],
         default="strategic",
@@ -610,6 +701,7 @@ if __name__ == "__main__":
             seed=args.seed,
             policy=baseline_policy,
             policy_name="baseline",
+            num_opponents=args.num_opponents,
         )
         print("Strategic:")
         evaluate(
@@ -619,6 +711,7 @@ if __name__ == "__main__":
             seed=args.seed,
             policy=strategic_baseline_policy,
             policy_name="strategic",
+            num_opponents=args.num_opponents,
         )
         if args.checkpoint_dir:
             print("Model:")
@@ -635,6 +728,7 @@ if __name__ == "__main__":
                 seed=args.seed,
                 policy=model_policy,
                 policy_name="model",
+                num_opponents=args.num_opponents,
             )
         else:
             print("Model: skipped (provide --checkpoint-dir)")
@@ -659,4 +753,5 @@ if __name__ == "__main__":
             seed=args.seed,
             policy=policy_fn,
             policy_name=args.policy,
+            num_opponents=args.num_opponents,
         )
