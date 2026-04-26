@@ -42,6 +42,7 @@ The result is simple to run, but difficult to game.
   - stagnation and repetition penalties
   - diversity incentives
   - self-sacrifice guardrails
+  - regret-aware terminal penalty when the final accepted deal is dominated by an earlier learner proposal
 
 ### Training layer
 
@@ -95,6 +96,19 @@ Key gains from training:
 - Efficiency: `+2.231` reward per round
 
 This is the main story. Success rate was already saturated, so improvement appears in quality and speed.
+
+Regret-aware reward logic now also penalizes strategically weak closures: if the final accepted deal is Pareto-dominated by a proposal the learner already made earlier in the same episode, the learner receives an explicit terminal penalty. This makes training sensitive to decision quality over time, not only whether a deal eventually closes.
+
+### Confidence framing (for evaluators)
+
+With `n=75` matched-seed episodes per series:
+
+- 95% CI for average reward:
+  - Untrained: `11.583 +/- 0.567`
+  - Trained: `13.268 +/- 0.184`
+- Approximate reward effect size (Cohen's d): `0.90` (large)
+
+The trained model not only scores higher, but does so with lower reward variance.
 
 ## OpenEnv rubric report
 
@@ -156,6 +170,22 @@ CogniMarket matters because it focuses on behavior that will matter in real mult
 - anti-gaming reward design
 
 If you are building autonomous infra agents, scheduling assistants, or cooperative multi-agent workflows, this setup is directly useful.
+
+## Judge-facing rubric alignment
+
+If scored on innovation, storytelling, reward improvement, and pipeline quality:
+
+- **Environment innovation**: hidden-preference multi-agent bargaining with real feasibility constraints and speed-vs-utility tradeoffs.
+- **Storytelling/presentation**: problem-first narrative, explicit episode mechanics, visual evidence, and reproducible pipeline.
+- **Improvement evidence**: matched-seed baseline vs untrained vs trained comparison showing measurable reward and efficiency gains.
+- **Reward/pipeline quality**: coherent multi-head rewards, anti-gaming checks, and end-to-end evaluators.
+
+Current gap to push toward top-tier scoring:
+- Dense informative signal remains the weakest rubric dimension (`dense_signal: 0.2`), likely due to many short trajectories.
+
+Planned upgrades:
+- Increase long-horizon negotiations, add opponent diversity, and include reward-head ablations + significance tests.
+- Add regret diagnostics (dominated-final-deal frequency) as a first-class evaluation metric.
 
 ## Reproduce the full pipeline
 

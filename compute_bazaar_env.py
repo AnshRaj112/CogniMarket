@@ -53,6 +53,8 @@ SPARSE_BONUS_THRESHOLD = 0.85
 EASY_ACCEPTANCE_THRESHOLD = 4.0
 HARD_ACCEPTANCE_THRESHOLD = 5.0
 MIN_UTILITY_VALUE = 0.001
+REGRET_DOMINATION_PENALTY = -0.025
+DOMINANCE_EPS = 1e-6
 
 
 def build_agent_ids(num_opponents: int) -> List[str]:
@@ -378,6 +380,7 @@ class ComputeBazaarEnv(_BaseEnv):
         self._deal: Optional[DealState] = None
         self._oversight_queries = 0
         self._last_learner_proposal: Optional[Dict[str, Dict[str, float]]] = None
+        self._learner_proposal_history: List[Dict[str, Dict[str, float]]] = []
         self._last_opponent_response = "none"
         self._last_opponent_utility = 0.0
 
@@ -426,6 +429,7 @@ class ComputeBazaarEnv(_BaseEnv):
         self._deal = None
         self._oversight_queries = 0
         self._last_learner_proposal = None
+        self._learner_proposal_history = []
         self._last_opponent_response = "none"
         self._last_opponent_utility = 0.0
         return self._build_obs(), {"difficulty": self._difficulty}
@@ -522,6 +526,9 @@ class ComputeBazaarEnv(_BaseEnv):
                 self._last_opponent_response = "repeated_proposal"
             # New proposal from learner: reset accepted_by to just the proposer
             self._deal = DealState(proposal=parsed_proposal, accepted_by={"learner"}, proposer="learner")
+            self._learner_proposal_history.append(
+                {aid: dict(alloc) for aid, alloc in parsed_proposal.items()}
+            )
             self._last_learner_proposal = parsed_proposal
             print(f"DEBUG [env.step R{self.rounds_used}]: NEW proposal from learner, "
                   f"accepted_by reset to {{'learner'}}")
@@ -552,6 +559,8 @@ class ComputeBazaarEnv(_BaseEnv):
 
         deal_closed = self._deal is not None and self._deal.accepted_by >= set(self.agent_ids)
         utility = 0.0
+        regret_penalty = 0.0
+        regret_triggered = False
         efficiency_bonus = 0.0
         sparse_bonus = 0.0
         deal_completion_bonus = 0.0
@@ -597,6 +606,10 @@ class ComputeBazaarEnv(_BaseEnv):
                 reward += 1.0
         if success:
             reward += 10.0
+            if self._deal is not None and self._proposal_dominated_by_history(self._deal.proposal):
+                regret_penalty = REGRET_DOMINATION_PENALTY
+                reward += regret_penalty
+                regret_triggered = True
         else:
             # With many agents, strict failure penalty is too harsh; decay it.
             reward -= 2.0 / max(1.0, math.sqrt(len(self.agent_ids)))
@@ -625,6 +638,8 @@ class ComputeBazaarEnv(_BaseEnv):
             "efficiency_bonus": efficiency_bonus,
             "sparse_bonus": sparse_bonus,
             "deal_completion_bonus": deal_completion_bonus,
+            "regret_penalty": regret_penalty,
+            "regret_triggered": regret_triggered,
             "oversight_queries": self._oversight_queries,
             "opponent_utility": round(opponent_utility, 4),
             "delta_opponent_utility": round(delta_opponent_utility, 4),
@@ -638,6 +653,53 @@ class ComputeBazaarEnv(_BaseEnv):
               f"terminated={self._terminated}, truncated={self._truncated}, "
               f"success={success}, utility={utility:.2f}")
         return self._build_obs(), float(reward), self._terminated, self._truncated, info
+
+    def _proposal_dominated_by_history(self, final_proposal: Dict[str, Dict[str, float]]) -> bool:
+        """Return True if a prior learner proposal dominates the final deal.
+
+        A proposal dominates when:
+        - Learner utility is strictly higher than in final deal, and
+        - No opponent utility is lower than in final deal.
+        """
+        if not self._learner_proposal_history:
+            return False
+
+        final_learner_u = self._calculate_utility(
+            allocation=final_proposal.get("learner", {}),
+            utility_vector=self.utilities.get("learner", [0.0, 0.0, 0.0]),
+        )
+        final_opp_u: Dict[str, float] = {
+            opp: self._calculate_utility(
+                allocation=final_proposal.get(opp, {}),
+                utility_vector=self.utilities.get(opp, [0.0, 0.0, 0.0]),
+            )
+            for opp in self.opponent_ids
+        }
+
+        for prev in self._learner_proposal_history:
+            if self._proposals_equal(prev, final_proposal):
+                continue
+
+            prev_learner_u = self._calculate_utility(
+                allocation=prev.get("learner", {}),
+                utility_vector=self.utilities.get("learner", [0.0, 0.0, 0.0]),
+            )
+            if prev_learner_u <= final_learner_u + DOMINANCE_EPS:
+                continue
+
+            no_opponent_worse = True
+            for opp in self.opponent_ids:
+                prev_opp_u = self._calculate_utility(
+                    allocation=prev.get(opp, {}),
+                    utility_vector=self.utilities.get(opp, [0.0, 0.0, 0.0]),
+                )
+                if prev_opp_u + DOMINANCE_EPS < final_opp_u.get(opp, 0.0):
+                    no_opponent_worse = False
+                    break
+
+            if no_opponent_worse:
+                return True
+        return False
 
     def _force_new_proposal(self) -> str:
         """Return a deterministic proposal when ACCEPT must be blocked.

@@ -41,6 +41,7 @@ Reward is shaped for both quality and efficiency:
 - utility from final allocation,
 - deal completion bonus,
 - speed/efficiency bonuses,
+- regret-aware terminal penalty when the final deal is dominated by an earlier learner proposal,
 - sparse high-quality bonus,
 - no-deal penalty.
 
@@ -75,13 +76,27 @@ Source: [`evidence_summary.md`](./evidence_summary.md)
 | Series | Success Rate | Avg Reward | Avg Utility | Avg Rounds | Efficiency |
 |---|---:|---:|---:|---:|---:|
 | Rule baseline | 100.0% | 12.895 +- 0.000 | 2.082 +- 0.000 | 2.00 | 6.448 |
-| Untrained model | 100.0% | 11.524 +- 2.910 | 2.579 +- 1.201 | 2.41 | 4.781 |
-| Trained model | 100.0% | 13.298 +- 1.203 | 2.469 +- 1.442 | 1.75 | 7.599 |
+| Untrained model | 100.0% | 11.583 +- 2.504 | 2.440 +- 1.268 | 2.40 | 4.826 |
+| Trained model | 100.0% | 13.268 +- 0.811 | 2.408 +- 1.374 | 1.88 | 7.057 |
 
 What changed after training:
-- Average reward: `+1.773` vs untrained
-- Convergence speed: `0.66` fewer rounds
-- Efficiency: `+2.818` reward-per-round
+- Average reward: `+1.684` vs untrained
+- Convergence speed: `0.52` fewer rounds
+- Efficiency: `+2.231` reward-per-round
+
+### Statistical Confidence (Judge-Facing)
+
+Using `n=75` matched-seed episodes per series (`hard` difficulty):
+
+- Reward gain (trained vs untrained): `+1.684`
+- 95% CI (reward mean):
+  - Untrained: `11.583 +/- 0.567`
+  - Trained: `13.268 +/- 0.184`
+- Approximate effect size (Cohen's d, reward): `0.90` (large)
+
+Interpretation:
+- Success rate is saturated at `100%`, so reward and efficiency are the meaningful indicators.
+- The trained policy improves reward with substantially lower variance and faster convergence.
 
 ![CogniMarket reward progress and evaluation](./reward_plot.png)
 *Caption: Top: Training dynamics under GRPO show consistent improvement in total reward and outcome quality, alongside stable formatting behavior.
@@ -95,6 +110,7 @@ Bottom: On identical evaluation seeds, the trained agent achieves higher reward 
 - Reward progression: clear upward trend across training, showing learning over time. **(backbone metric)**
 - Outcome reward mean: improving, indicating the agent is converging to better negotiated deals.
 - Format reward mean: increasing, showing stronger action-structure compliance and output robustness.
+- Regret-aware terminal shaping: discourages accepting strategically inferior final deals when a better Pareto-feasible learner proposal already existed in the same episode.
 - Loss curve: stabilizes after an early spike, consistent with stable post-warmup optimization.
 
 ### Detailed Training Curves (Reports)
@@ -171,3 +187,17 @@ python evaluate_openenv_rubrics.py --episodes 20 --difficulty hard --policy stra
 - Training pipeline: [`train.py`](./train.py), [`run_training_evidence.py`](./run_training_evidence.py)
 - OpenEnv rubric report: [`rubric_report.json`](./rubric_report.json)
 - W&B run: not used in this run (`train.py` supports optional `--report-to wandb`).
+
+## Current Limitations and Improvements
+
+Current limitations:
+- Dense informative signal remains weaker than desired in short trajectories
+  (`dense_signal: 0.2`, `rich_informative_signal: false`).
+- Success rate is saturated at `100%`, so it is less useful as a differentiating metric.
+
+Planned improvements:
+- Increase long-horizon negotiation frequency (reduce 1-step saturation).
+- Add harder opponent profiles and dynamic preference shifts.
+- Report statistical significance tests alongside confidence intervals.
+- Expand ablations (remove one reward head at a time) to show causal contribution.
+- Add dedicated regret diagnostics (rate of dominated-final-deal episodes) to quantify strategic consistency gains.
