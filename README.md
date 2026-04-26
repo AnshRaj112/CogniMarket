@@ -70,6 +70,7 @@ This gives a realistic multi-agent bargaining dynamic where the learner must inf
 ## Results
 
 Evidence is generated from real rollouts on the environment (`hard` difficulty, matched seeds across series).
+All summary metrics below are synchronized to [`checkpoints/training_progress.json`](./checkpoints/training_progress.json).
 
 Source: [`evidence_summary.md`](./evidence_summary.md)
 
@@ -84,7 +85,7 @@ What changed after training:
 - Convergence speed: `0.52` fewer rounds
 - Efficiency: `+2.231` reward-per-round
 
-### Statistical Confidence (Judge-Facing)
+### Statistical Confidence
 
 Using `n=75` matched-seed episodes per series (`hard` difficulty):
 

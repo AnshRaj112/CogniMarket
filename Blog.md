@@ -67,6 +67,7 @@ The result is simple to run, but difficult to game.
 ## What changed after training
 
 The strongest evidence is in `checkpoints/training_progress.json` and `evidence_summary.md`.
+All reward table values are taken from `checkpoints/training_progress.json` as the source of truth.
 
 Using `hard` difficulty with matched seeds:
 
