@@ -54,6 +54,11 @@ def _metric_columns(columns: Sequence[str]) -> List[str]:
     return sorted(out, key=lambda x: (priority.get(x.lower(), 2), x.lower()))
 
 
+def _safe_metric_filename(metric: str) -> str:
+    """Convert metric names into filesystem-safe filename stems."""
+    return metric.replace("/", "_").replace("\\", "_")
+
+
 def plot_loss_curves(log_history: List[Dict[str, Any]], out_path: Path, smooth: int = 0) -> None:
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -127,7 +132,7 @@ def plot_metric_curves_separately(
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=8)
 
-        out_path = out_dir / f"{col}_plot.png"
+        out_path = out_dir / f"{_safe_metric_filename(col)}_plot.png"
         fig.savefig(out_path, dpi=150)
         if show:
             plt.show()
