@@ -162,6 +162,7 @@ python evaluate_openenv_rubrics.py --episodes 20 --difficulty hard --policy stra
 
 ## Additional References
 
+- Project blog: [`Blog.md`](./Blog.md)
 - Environment on Hugging Face Space: [AnshRaj112/cognimarket](https://huggingface.co/spaces/AnshRaj112/cognimarket)
 - Colab training notebook: [CogniMarket training notebook](https://colab.research.google.com/drive/1qDy-I_JIA5cdNN3RbnBf0r-1wX1-l6Sf?usp=sharing)
 - Training evidence summary: [`evidence_summary.md`](./evidence_summary.md)
