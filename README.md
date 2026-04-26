@@ -84,10 +84,11 @@ What changed after training:
 - Efficiency: `+2.818` reward-per-round
 
 ![CogniMarket reward progress and evaluation](./reward_plot.png)
-*Caption: Top panel shows GRPO reward metrics over training steps; bottom panel compares baseline, pre-training, and post-training performance on the same seeds.*
+*Caption: Top: Training dynamics under GRPO show consistent improvement in total reward and outcome quality, alongside stable formatting behavior.
+Bottom: On identical evaluation seeds, the trained agent achieves higher reward and faster convergence than both the baseline and untrained model, while maintaining near-perfect success rates—demonstrating learned negotiation efficiency. Success rate is saturated; differences are reflected in reward and efficiency.*
 
 ![CogniMarket training loss](./reports/loss_plot.png)
-*Caption: Training loss trend over optimization steps (lower is better; smooth decline indicates stable optimization).*
+*Caption: Training loss exhibits an initial spike as the policy explores new strategies, followed by a steady decline—indicating stabilization and convergence of the optimization process.*
 
 ### Key Training Signals
 
@@ -99,16 +100,16 @@ What changed after training:
 ### Detailed Training Curves (Reports)
 
 ![Outcome reward mean curve](./reports/rewards_outcome_reward_fn_mean_plot.png)
-*Caption: Mean outcome reward increases over training, indicating improving deal quality.*
+*Caption: Outcome reward improves steadily over training, indicating that the agent learns to propose increasingly acceptable and mutually beneficial allocations.*
 
 ![Format reward mean curve](./reports/rewards_format_reward_fn_mean_plot.png)
-*Caption: Mean format reward rises, showing stronger structured-action compliance.*
+*Caption: Format reward improves steadily, indicating that the agent learns to produce increasingly well-structured and valid action outputs.*
 
 ![Proposal quality reward mean curve](./reports/rewards_proposal_quality_reward_fn_mean_plot.png)
-*Caption: Proposal-quality reward trend shows improving per-turn negotiation quality.*
+*Caption: Proposal-quality reward improves over time (becomes less negative), indicating that the agent learns to generate increasingly effective and acceptable proposals at each negotiation step.*
 
 ![Overall reward plot from reports](./reports/reward_plot.png)
-*Caption: Combined training reward signals from the report artifacts.*
+*Caption: Total reward improves steadily over training (becoming less negative), indicating that the agent learns to make progressively better negotiation decisions and achieve more favorable outcomes.*
 
 ### OpenEnv Rubric Check
 
