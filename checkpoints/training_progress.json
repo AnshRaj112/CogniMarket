@@ -1,0 +1,47 @@
+{
+  "baseline": {
+    "success_rate": 1.0,
+    "avg_reward": 12.895230666666667,
+    "avg_utility": 2.0824920000000002,
+    "avg_rounds": 2,
+    "policy": "baseline_equal_split",
+    "num_episodes": 75,
+    "difficulty": "hard",
+    "seed": 42,
+    "reward_std": 0.0,
+    "utility_std": 0.0,
+    "efficiency_score": 6.447615333333333,
+    "adjusted_score_lambda": 0.5,
+    "adjusted_score": 11.895230666666667
+  },
+  "pre": {
+    "policy": "untrained_Qwen2.5-1.5B-Instruct-bnb-4bit",
+    "num_episodes": 75,
+    "difficulty": "hard",
+    "seed": 42,
+    "success_rate": 1.0,
+    "avg_reward": 11.583205333333334,
+    "reward_std": 2.5040219510464605,
+    "avg_utility": 2.440090666666667,
+    "utility_std": 1.267675021145418,
+    "avg_rounds": 2.4,
+    "efficiency_score": 4.826335555555556,
+    "adjusted_score_lambda": 0.5,
+    "adjusted_score": 10.383205333333335
+  },
+  "post": {
+    "policy": "trained_model",
+    "num_episodes": 75,
+    "difficulty": "hard",
+    "seed": 42,
+    "success_rate": 1.0,
+    "avg_reward": 13.267605333333334,
+    "reward_std": 0.8105354104496563,
+    "avg_utility": 2.407636,
+    "utility_std": 1.3735710415260358,
+    "avg_rounds": 1.88,
+    "efficiency_score": 7.057236879432625,
+    "adjusted_score_lambda": 0.5,
+    "adjusted_score": 12.327605333333334
+  }
+}
