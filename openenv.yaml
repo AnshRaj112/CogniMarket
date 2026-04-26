@@ -1,5 +1,5 @@
 name: cogni-market
-version: "0.1.0"
+version: "0.1.1"
 description: Multi-agent compute allocation negotiation environment.
 framework: openenv
 environment:
@@ -14,3 +14,7 @@ api:
 links:
   space: https://huggingface.co/spaces/AnshRaj112/cognimarket
   colab: https://colab.research.google.com/drive/16G-Juzt6g9FrDaB2WJRVElHeMheKWnlz?usp=sharing
+rubrics:
+  type: composable_code
+  module: openenv_rubrics:ComputeBazaarRubric
+  evaluator: evaluate_openenv_rubrics.py

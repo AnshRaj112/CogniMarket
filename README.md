@@ -47,6 +47,8 @@ Reward is shaped for both quality and efficiency:
 Core files:
 - Environment: [`compute_bazaar_env.py`](./compute_bazaar_env.py)
 - Reward logic: [`reward.py`](./reward.py)
+- Composable rubrics: [`openenv_rubrics.py`](./openenv_rubrics.py)
+- Rubric evaluator: [`evaluate_openenv_rubrics.py`](./evaluate_openenv_rubrics.py)
 - Training: [`train.py`](./train.py)
 - OpenEnv manifest: [`openenv.yaml`](./openenv.yaml)
 
@@ -84,6 +86,20 @@ What changed after training:
 ![CogniMarket reward progress and evaluation](./reward_plot.png)
 *Caption: Top panel shows GRPO reward metrics over training steps; bottom panel compares baseline, pre-training, and post-training performance on the same seeds.*
 
+![CogniMarket training loss](./reports/loss_plot.png)
+*Caption: Training loss trend over optimization steps (lower is better; smooth decline indicates stable optimization).*
+
+### OpenEnv Rubric Check
+
+Composable rubric evaluation is wired through [`openenv_rubrics.py`](./openenv_rubrics.py) and run via [`evaluate_openenv_rubrics.py`](./evaluate_openenv_rubrics.py).
+
+Latest rubric report source: [`rubric_report.json`](./rubric_report.json)
+
+- Rich informative signal: **false** (dense signal currently limited by many 1-step episodes)
+- Captures hard-to-measure proxy: **true**
+- Uses composable OpenEnv rubrics: **true**
+- Hard to game: **true**
+
 ## Why It Matters
 
 Who should care:
@@ -106,11 +122,12 @@ Why:
 ### Minimal local run
 ```bash
 pip install -r requirements.txt
-# Includes OpenEnv latest release: openenv==0.1.13
+# Includes OpenEnv latest release (verified): openenv==0.1.13
 python train.py
 python run_training_evidence.py --checkpoint-dir ./checkpoints --difficulty hard --seed 42
 python plot_training_rewards.py --checkpoint-dir ./checkpoints --smooth 10
 python plot_training_loss.py --checkpoint-dir ./checkpoints --smooth 10
+python evaluate_openenv_rubrics.py --episodes 20 --difficulty hard --policy strategic
 ```
 
 ## Submission Assets
@@ -127,8 +144,9 @@ python plot_training_loss.py --checkpoint-dir ./checkpoints --smooth 10
 - Colab training notebook: [CogniMarket training notebook](https://colab.research.google.com/drive/1qDy-I_JIA5cdNN3RbnBf0r-1wX1-l6Sf?usp=sharing)
 - Training evidence summary: [`evidence_summary.md`](./evidence_summary.md)
 - Reward and evaluation plot: [`reward_plot.png`](./reward_plot.png)
-- Loss plot (generate and commit): `checkpoints/loss_plot.png` via [`plot_training_loss.py`](./plot_training_loss.py)
+- Loss plot (generate and commit): [`reports/loss_plot.png`](./reports/loss_plot.png) via [`plot_training_loss.py`](./plot_training_loss.py)
 - Training pipeline: [`train.py`](./train.py), [`run_training_evidence.py`](./run_training_evidence.py)
+- OpenEnv rubric report: [`rubric_report.json`](./rubric_report.json)
 - W&B run: not used in this run (`train.py` supports optional `--report-to wandb`).
 - Additional media (video/blog/slides/presentation): not included in this submission.
 

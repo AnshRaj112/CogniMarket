@@ -1,0 +1,23 @@
+{
+  "config": {
+    "episodes": 5,
+    "difficulty": "hard",
+    "max_rounds": 12,
+    "seed": 42,
+    "policy": "strategic"
+  },
+  "episode_avg_reward": 12.038180369781275,
+  "success_rate": 1.0,
+  "rubric_scores": {
+    "anti_gaming": 1.0,
+    "composite": 0.63,
+    "dense_signal": 0.2,
+    "hard_to_measure_proxy": 0.7
+  },
+  "checks": {
+    "rich_informative_signal": false,
+    "captures_hard_to_measure_proxy": true,
+    "composable_rubric_used": true,
+    "hard_to_game": true
+  }
+}

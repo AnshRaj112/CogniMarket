@@ -5,3 +5,11 @@ node_modules/
 read_pdf.py
 checkpoints/**/tokenizer.json
 checkpoints/tokenizer.json
+# Intermediate trainer snapshots and optimizer states
+checkpoints/checkpoint-*/
+checkpoints/**/optimizer.pt
+checkpoints/**/scheduler.pt
+checkpoints/**/scaler.pt
+checkpoints/**/rng_state.pth
+checkpoints/**/trainer_state.json
+checkpoints/**/training_args.bin
