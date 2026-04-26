@@ -24,7 +24,6 @@ from evaluate import (
     baseline_policy,
     load_model_policy,
     run_episode,
-    run_rule_baseline_metrics,
     strategic_baseline_policy,
 )
 
@@ -65,6 +64,8 @@ def evaluate_policy_metrics(
     max_rounds: int,
     seed: int,
     num_opponents: int,
+    strict_utility_threshold: float,
+    strict_rounds_threshold: int,
 ) -> Dict[str, Any]:
     """Run fixed-seed multi-episode eval and return aggregate metrics."""
     def safe_policy(obs: Dict[str, Any], round_num: int) -> str:
@@ -98,6 +99,12 @@ def evaluate_policy_metrics(
     utilities = [float(r["utility_achieved"]) for r in results]
     rounds = [float(r["rounds_used"]) for r in results]
     successes = [bool(r["success"]) for r in results]
+    strict_successes = [
+        bool(r["success"])
+        and float(r["utility_achieved"]) >= strict_utility_threshold
+        and int(r["rounds_used"]) <= strict_rounds_threshold
+        for r in results
+    ]
     avg_reward = statistics.mean(rewards) if rewards else 0.0
     avg_rounds = statistics.mean(rounds) if rounds else 0.0
     efficiency_score = (avg_reward / avg_rounds) if avg_rounds > 0 else 0.0
@@ -109,7 +116,11 @@ def evaluate_policy_metrics(
         "num_episodes": num_episodes,
         "difficulty": difficulty,
         "seed": seed,
-        "success_rate": sum(1 for s in successes if s) / max(len(successes), 1),
+        "raw_success_rate": sum(1 for s in successes if s) / max(len(successes), 1),
+        "success_rate": sum(1 for s in strict_successes if s) / max(len(strict_successes), 1),
+        "strict_success_rate": sum(1 for s in strict_successes if s) / max(len(strict_successes), 1),
+        "strict_success_utility_threshold": strict_utility_threshold,
+        "strict_success_rounds_threshold": strict_rounds_threshold,
         "avg_reward": avg_reward,
         "reward_std": statistics.stdev(rewards) if len(rewards) > 1 else 0.0,
         "avg_utility": statistics.mean(utilities) if utilities else 0.0,
@@ -124,6 +135,7 @@ def evaluate_policy_metrics(
 def _fmt_metrics_row(name: str, row: Dict[str, Any]) -> str:
     return (
         f"| {name} | {row['success_rate'] * 100:.1f}% | "
+        f"{row.get('raw_success_rate', row['success_rate']) * 100:.1f}% | "
         f"{row['avg_reward']:.3f} ± {row.get('reward_std', 0.0):.3f} | "
         f"{row['avg_utility']:.3f} ± {row.get('utility_std', 0.0):.3f} | "
         f"{row['avg_rounds']:.2f} | "
@@ -140,6 +152,8 @@ def build_markdown_summary(
     difficulty: str,
     max_rounds: int,
     seed: int,
+    strict_utility_threshold: float,
+    strict_rounds_threshold: int,
 ) -> str:
     delta_reward = post["avg_reward"] - pre["avg_reward"]
     delta_success = (post["success_rate"] - pre["success_rate"]) * 100.0
@@ -160,10 +174,11 @@ def build_markdown_summary(
         f"- Max rounds: `{max_rounds}`",
         f"- Episodes per series: `{episodes}`",
         f"- Base seed: `{seed}` (episode seeds = `seed + ep`)",
+        f"- Strict success rule (primary): raw success AND utility >= `{strict_utility_threshold:.2f}` AND rounds <= `{strict_rounds_threshold}`",
         "",
         "### Quantitative Comparison",
-        "| Series | Success Rate | Avg Reward | Avg Utility | Avg Rounds | Efficiency |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Series | Strict Success Rate | Raw Success Rate | Avg Reward | Avg Utility | Avg Rounds | Efficiency |",
+        "|---|---:|---:|---:|---:|---:|---:|",
         _fmt_metrics_row("Rule baseline", baseline),
         _fmt_metrics_row("Untrained model", pre),
         _fmt_metrics_row("Trained model", post),
@@ -176,7 +191,8 @@ def build_markdown_summary(
         f"- Utility trade-off: `{delta_utility:+.3f}` (small decrease can occur when the policy closes deals earlier).",
         "",
         "### Interpretation",
-        "Success rate is saturated, so it is not a strong differentiator in this run.",
+        "Strict success is the primary acceptance metric for this report.",
+        "Raw success is retained for transparency and comparability with prior runs.",
         "The trained agent improves reward and efficiency by converging faster,",
         "trading a small amount of utility for quicker deal closure.",
         "",
@@ -209,6 +225,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Base random seed.")
     parser.add_argument("--num-opponents", type=int, default=2, dest="num_opponents", help="Number of opponents.")
     parser.add_argument(
+        "--strict-success-utility-threshold",
+        type=float,
+        default=2.2,
+        dest="strict_success_utility_threshold",
+        help="Utility threshold for strict success.",
+    )
+    parser.add_argument(
+        "--strict-success-rounds-threshold",
+        type=int,
+        default=2,
+        dest="strict_success_rounds_threshold",
+        help="Rounds threshold for strict success.",
+    )
+    parser.add_argument(
         "--pre-policy",
         choices=["random", "strategic", "baseline"],
         default="random",
@@ -223,18 +253,17 @@ def main() -> None:
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline = run_rule_baseline_metrics(
+    baseline = evaluate_policy_metrics(
+        baseline_policy,
+        policy_name="baseline_equal_split",
         num_episodes=args.episodes,
         difficulty=args.difficulty,
         max_rounds=args.max_rounds,
         seed=args.seed,
         num_opponents=args.num_opponents,
+        strict_utility_threshold=args.strict_success_utility_threshold,
+        strict_rounds_threshold=args.strict_success_rounds_threshold,
     )
-    baseline["num_episodes"] = args.episodes
-    baseline["difficulty"] = args.difficulty
-    baseline["seed"] = args.seed
-    baseline.setdefault("reward_std", 0.0)
-    baseline.setdefault("utility_std", 0.0)
     baseline_avg_rounds = float(baseline.get("avg_rounds", 0.0))
     baseline_avg_reward = float(baseline.get("avg_reward", 0.0))
     baseline["efficiency_score"] = (
@@ -270,6 +299,8 @@ def main() -> None:
         max_rounds=args.max_rounds,
         seed=args.seed,
         num_opponents=args.num_opponents,
+        strict_utility_threshold=args.strict_success_utility_threshold,
+        strict_rounds_threshold=args.strict_success_rounds_threshold,
     )
 
     post_policy = load_model_policy(
@@ -286,6 +317,8 @@ def main() -> None:
         max_rounds=args.max_rounds,
         seed=args.seed,
         num_opponents=args.num_opponents,
+        strict_utility_threshold=args.strict_success_utility_threshold,
+        strict_rounds_threshold=args.strict_success_rounds_threshold,
     )
 
     progress = {"baseline": baseline, "pre": pre, "post": post}
@@ -300,6 +333,8 @@ def main() -> None:
         difficulty=args.difficulty,
         max_rounds=args.max_rounds,
         seed=args.seed,
+        strict_utility_threshold=args.strict_success_utility_threshold,
+        strict_rounds_threshold=args.strict_success_rounds_threshold,
     )
     summary_path = checkpoint_dir / "evidence_summary.md"
     summary_path.write_text(summary_md, encoding="utf-8")

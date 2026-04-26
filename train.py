@@ -31,7 +31,7 @@ from compute_bazaar_env import (
     normalize_agent_names,
     validate_and_fix_proposal,
 )
-from evaluate import run_episode, run_rule_baseline_metrics
+from evaluate import baseline_policy, run_episode
 from reward import NO_DEAL_PENALTY, calculate_proposal_reward
 
 
@@ -50,6 +50,8 @@ NUM_EPOCHS = 10
 GRPO_CLIP_RATIO = 0.2   # PPO/GRPO clipping epsilon.
 KL_COEFF = 0.01         # Reduced from 0.02 to allow more exploration (anti-collapse).
 SAVE_DIR = "./checkpoints"
+STRICT_SUCCESS_UTILITY_THRESHOLD = 2.2
+STRICT_SUCCESS_ROUNDS_THRESHOLD = 2
 
 
 # ---------------------------------------------------------------------------
@@ -202,56 +204,66 @@ def _make_model_policy(model, tokenizer, difficulty: str, max_rounds: int):
     return _policy
 
 
-def run_eval_suite(model, tokenizer, difficulty: str, max_rounds: int, num_episodes: int = 5, seed: int = 42) -> Dict[str, float]:
-    """Run a suite of evaluation episodes and return aggregated stats.
-
-    Includes diagnostics (Component 6): tracks unique proposals, acceptance
-    rate, and flags policy collapse when >80% of proposals are identical.
-    """
-    from unsloth import FastLanguageModel
-    from evaluate import run_episode
-    import statistics
-
-    # Ensure model is in inference mode
-    model = FastLanguageModel.for_inference(model)
-    policy = _make_model_policy(model, tokenizer, difficulty, max_rounds)
+def _run_policy_eval_suite(
+    policy,
+    difficulty: str,
+    max_rounds: int,
+    num_episodes: int,
+    seed: int,
+    strict_utility_threshold: float,
+    strict_rounds_threshold: int,
+) -> Dict[str, float]:
+    """Run evaluation for any policy with strict + raw success metrics."""
     env = ComputeBazaarEnv(max_rounds=max_rounds)
-    
     results = []
-    all_proposals = []  # Track for collapse detection
+    all_proposals = []
     for ep in range(1, num_episodes + 1):
         print(f"\n  --- Eval Episode {ep}/{num_episodes} ---")
         metrics = run_episode(env, difficulty=difficulty, seed=seed + ep, policy=policy)
         results.append(metrics)
-        success_str = "SUCCESS" if metrics["success"] else "FAIL"
+        strict_success = (
+            bool(metrics["success"])
+            and float(metrics["utility_achieved"]) >= strict_utility_threshold
+            and int(metrics["rounds_used"]) <= strict_rounds_threshold
+        )
+        success_str = "STRICT_SUCCESS" if strict_success else "STRICT_FAIL"
         print(
             f"  [{success_str}] reward={metrics['total_reward']:.2f}, "
             f"utility={metrics['utility_achieved']:.2f}, "
             f"rounds={metrics['rounds_used']}, "
             f"terminated={metrics.get('terminated', '?')}"
         )
-        # Collect proposals from history for collapse detection
         for turn in env.history:
             if turn.startswith("learner:") and "gpu" in turn.lower():
                 all_proposals.append(turn)
 
-    # --- Diagnostics (Component 6) ---
     unique_proposals = len(set(all_proposals))
     total_proposals = len(all_proposals)
     collapse_ratio = (total_proposals - unique_proposals) / max(total_proposals, 1)
     policy_collapsed = collapse_ratio > 0.80
+    strict_successes = [
+        bool(r["success"])
+        and float(r["utility_achieved"]) >= strict_utility_threshold
+        and int(r["rounds_used"]) <= strict_rounds_threshold
+        for r in results
+    ]
+    raw_successes = [bool(r["success"]) for r in results]
 
     print(f"\n  --- Diagnostics ---")
     print(f"  Total proposals: {total_proposals}")
     print(f"  Unique proposals: {unique_proposals}")
     print(f"  Collapse ratio: {collapse_ratio:.1%}")
     if policy_collapsed:
-        print(f"  WARNING: Policy collapse detected! >80% identical proposals.")
+        print("  WARNING: Policy collapse detected! >80% identical proposals.")
     else:
-        print(f"  Policy diversity: OK")
-    
+        print("  Policy diversity: OK")
+
     return {
-        "success_rate": sum(r["success"] for r in results) / len(results),
+        "success_rate": sum(1 for s in strict_successes if s) / len(strict_successes),
+        "strict_success_rate": sum(1 for s in strict_successes if s) / len(strict_successes),
+        "raw_success_rate": sum(1 for s in raw_successes if s) / len(raw_successes),
+        "strict_success_utility_threshold": strict_utility_threshold,
+        "strict_success_rounds_threshold": strict_rounds_threshold,
         "avg_reward": statistics.mean(r["total_reward"] for r in results),
         "avg_utility": statistics.mean(r["utility_achieved"] for r in results),
         "avg_rounds": statistics.mean(r["rounds_used"] for r in results),
@@ -259,6 +271,38 @@ def run_eval_suite(model, tokenizer, difficulty: str, max_rounds: int, num_episo
         "total_proposals": total_proposals,
         "policy_collapsed": policy_collapsed,
     }
+
+
+def run_eval_suite(
+    model,
+    tokenizer,
+    difficulty: str,
+    max_rounds: int,
+    num_episodes: int = 5,
+    seed: int = 42,
+    strict_utility_threshold: float = STRICT_SUCCESS_UTILITY_THRESHOLD,
+    strict_rounds_threshold: int = STRICT_SUCCESS_ROUNDS_THRESHOLD,
+) -> Dict[str, float]:
+    """Run a suite of evaluation episodes and return aggregated stats.
+
+    Includes diagnostics (Component 6): tracks unique proposals, acceptance
+    rate, and flags policy collapse when >80% of proposals are identical.
+    """
+    from unsloth import FastLanguageModel
+    import statistics
+
+    # Ensure model is in inference mode
+    model = FastLanguageModel.for_inference(model)
+    policy = _make_model_policy(model, tokenizer, difficulty, max_rounds)
+    return _run_policy_eval_suite(
+        policy=policy,
+        difficulty=difficulty,
+        max_rounds=max_rounds,
+        num_episodes=num_episodes,
+        seed=seed,
+        strict_utility_threshold=strict_utility_threshold,
+        strict_rounds_threshold=strict_rounds_threshold,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +536,8 @@ def train(
     curriculum_window: int = 50,
     curriculum_promote_threshold: float = 0.70,
     curriculum_demote_threshold: float = 0.35,
+    strict_success_utility_threshold: float = STRICT_SUCCESS_UTILITY_THRESHOLD,
+    strict_success_rounds_threshold: int = STRICT_SUCCESS_ROUNDS_THRESHOLD,
 ) -> None:
     """Fine-tune a language model on compute negotiation using Unsloth + TRL GRPO.
 
@@ -628,7 +674,16 @@ def train(
     # 5. Pre-training evaluation
     # ------------------------------------------------------------------
     print("\nRunning Pre-training evaluation (Step 0) …")
-    pre_eval = run_eval_suite(model, tokenizer, difficulty, max_rounds, num_episodes=5, seed=seed or 42)
+    pre_eval = run_eval_suite(
+        model,
+        tokenizer,
+        difficulty,
+        max_rounds,
+        num_episodes=5,
+        seed=seed or 42,
+        strict_utility_threshold=strict_success_utility_threshold,
+        strict_rounds_threshold=strict_success_rounds_threshold,
+    )
     print(f"  Pre-train Success Rate: {pre_eval['success_rate']*100:.1f}%")
 
     # ------------------------------------------------------------------
@@ -657,17 +712,30 @@ def train(
     # 8. Post-training evaluation & Comparison
     # ------------------------------------------------------------------
     print("\nRunning Post-training evaluation …")
-    post_eval = run_eval_suite(model, tokenizer, difficulty, max_rounds, num_episodes=10, seed=seed or 42)
+    post_eval = run_eval_suite(
+        model,
+        tokenizer,
+        difficulty,
+        max_rounds,
+        num_episodes=10,
+        seed=seed or 42,
+        strict_utility_threshold=strict_success_utility_threshold,
+        strict_rounds_threshold=strict_success_rounds_threshold,
+    )
 
     print("\nRule baseline (equal-split policy, same seeds as post-eval) …")
-    baseline_eval = run_rule_baseline_metrics(
-        num_episodes=10,
+    baseline_eval = _run_policy_eval_suite(
+        policy=baseline_policy,
         difficulty=difficulty,
         max_rounds=max_rounds,
+        num_episodes=10,
         seed=seed or 42,
+        strict_utility_threshold=strict_success_utility_threshold,
+        strict_rounds_threshold=strict_success_rounds_threshold,
     )
     print(
-        f"  Baseline success rate: {baseline_eval['success_rate']*100:.1f}% | "
+        f"  Baseline strict success rate: {baseline_eval['success_rate']*100:.1f}% "
+        f"(raw: {baseline_eval.get('raw_success_rate', 0.0)*100:.1f}%) | "
         f"avg reward: {baseline_eval['avg_reward']:.2f} | "
         f"avg utility: {baseline_eval['avg_utility']:.3f}"
     )
@@ -747,6 +815,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--curriculum-window", type=int, default=50, dest="curriculum_window")
     parser.add_argument("--curriculum-promote-threshold", type=float, default=0.70, dest="curriculum_promote_threshold")
     parser.add_argument("--curriculum-demote-threshold", type=float, default=0.35, dest="curriculum_demote_threshold")
+    parser.add_argument(
+        "--strict-success-utility-threshold",
+        type=float,
+        default=STRICT_SUCCESS_UTILITY_THRESHOLD,
+        dest="strict_success_utility_threshold",
+    )
+    parser.add_argument(
+        "--strict-success-rounds-threshold",
+        type=int,
+        default=STRICT_SUCCESS_ROUNDS_THRESHOLD,
+        dest="strict_success_rounds_threshold",
+    )
     return parser.parse_args()
 
 
@@ -767,4 +847,6 @@ if __name__ == "__main__":
         curriculum_window=args.curriculum_window,
         curriculum_promote_threshold=args.curriculum_promote_threshold,
         curriculum_demote_threshold=args.curriculum_demote_threshold,
+        strict_success_utility_threshold=args.strict_success_utility_threshold,
+        strict_success_rounds_threshold=args.strict_success_rounds_threshold,
     )
