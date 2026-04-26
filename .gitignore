@@ -4,3 +4,4 @@ node_modules/
 .env
 read_pdf.py
 checkpoints/**/tokenizer.json
+checkpoints/tokenizer.json
