@@ -124,7 +124,7 @@ python plot_training_loss.py --checkpoint-dir ./checkpoints --smooth 10
 ## Additional References
 
 - Environment on Hugging Face Space: [AnshRaj112/cognimarket](https://huggingface.co/spaces/AnshRaj112/cognimarket)
-- Colab training notebook: [CogniMarket training notebook](https://colab.research.google.com/drive/16G-Juzt6g9FrDaB2WJRVElHeMheKWnlz?usp=sharing)
+- Colab training notebook: [CogniMarket training notebook](https://colab.research.google.com/drive/1qDy-I_JIA5cdNN3RbnBf0r-1wX1-l6Sf?usp=sharing)
 - Training evidence summary: [`evidence_summary.md`](./evidence_summary.md)
 - Reward and evaluation plot: [`reward_plot.png`](./reward_plot.png)
 - Loss plot (generate and commit): `checkpoints/loss_plot.png` via [`plot_training_loss.py`](./plot_training_loss.py)
