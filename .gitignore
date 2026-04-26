@@ -3,3 +3,4 @@ Before.pdf
 node_modules/
 .env
 read_pdf.py
+checkpoints/**/tokenizer.json
