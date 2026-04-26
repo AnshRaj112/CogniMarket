@@ -171,5 +171,3 @@ python evaluate_openenv_rubrics.py --episodes 20 --difficulty hard --policy stra
 - Training pipeline: [`train.py`](./train.py), [`run_training_evidence.py`](./run_training_evidence.py)
 - OpenEnv rubric report: [`rubric_report.json`](./rubric_report.json)
 - W&B run: not used in this run (`train.py` supports optional `--report-to wandb`).
-- Additional media (video/blog/slides/presentation): not included in this submission.
-
