@@ -89,6 +89,27 @@ What changed after training:
 ![CogniMarket training loss](./reports/loss_plot.png)
 *Caption: Training loss trend over optimization steps (lower is better; smooth decline indicates stable optimization).*
 
+### Key Training Signals
+
+- Reward progression: clear upward trend across training, showing learning over time. **(backbone metric)**
+- Outcome reward mean: improving, indicating the agent is converging to better negotiated deals.
+- Format reward mean: increasing, showing stronger action-structure compliance and output robustness.
+- Loss curve: stabilizes after an early spike, consistent with stable post-warmup optimization.
+
+### Detailed Training Curves (Reports)
+
+![Outcome reward mean curve](./reports/rewards_outcome_reward_fn_mean_plot.png)
+*Caption: Mean outcome reward increases over training, indicating improving deal quality.*
+
+![Format reward mean curve](./reports/rewards_format_reward_fn_mean_plot.png)
+*Caption: Mean format reward rises, showing stronger structured-action compliance.*
+
+![Proposal quality reward mean curve](./reports/rewards_proposal_quality_reward_fn_mean_plot.png)
+*Caption: Proposal-quality reward trend shows improving per-turn negotiation quality.*
+
+![Overall reward plot from reports](./reports/reward_plot.png)
+*Caption: Combined training reward signals from the report artifacts.*
+
 ### OpenEnv Rubric Check
 
 Composable rubric evaluation is wired through [`openenv_rubrics.py`](./openenv_rubrics.py) and run via [`evaluate_openenv_rubrics.py`](./evaluate_openenv_rubrics.py).
