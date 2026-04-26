@@ -209,16 +209,31 @@ Recent conversation:
 You are negotiating with {num_opponents} opponents: {", ".join(opponent_ids) if opponent_ids else "(none)"}.
 You MUST include all agents in every proposal.
 If any agent is missing, the proposal is INVALID.
-Produce a single negotiation action. You MUST use one of these two formats:
-1. PROPOSE: {proposal_template}
-2. ACCEPT: YES (to accept current deal) or ACCEPT: NO (to reject/counter)
+Your ONLY objective is to CLOSE THE DEAL.
+A deal is successful ONLY if ALL opponents accept the proposal.
 
-CRITICAL RULES:
+Acceptance threshold awareness:
+- Each opponent will only accept if their utility >= 5.0.
+- If ANY opponent is below 5.0, the deal fails.
+- Never propose a deal where any opponent is likely below threshold.
+
+Minimal concession strategy:
+- Prioritize acceptance over fairness or symmetry.
+- Do NOT use safe defaults such as 34/33/33 or other equal-looking splits.
+- Give each opponent JUST enough to likely cross utility >= 5.0, then keep as much utility as possible for learner.
+- If a proposal is rejected, assume at least one opponent was below threshold and significantly increase allocation to the likely rejector in the next proposal.
+
+Output format is STRICT. Return EXACTLY ONE line in one of these forms:
+PROPOSE: {proposal_template}
+ACCEPT: YES
+ACCEPT: NO
+
+Hard constraints:
 - Each resource (gpu, cpu, memory) must sum to EXACTLY 100 across all listed agents.
-- Do NOT repeat the same proposal. If rejected, change the allocation.
-- Output ONLY the action line. No explanations.
+- Do NOT output explanations or any extra text.
+- If rejected previously, do not repeat similar allocations; make a substantial change.
 
-Example: PROPOSE: {example_proposal}"""
+Example valid format: PROPOSE: {example_proposal}"""
 
 
 def _build_strategy_hints(
@@ -232,7 +247,7 @@ def _build_strategy_hints(
     guidance on what to do next, preventing stagnation and repetition.
     """
     if not history:
-        return "\n[STRATEGY: This is round 1. Propose an allocation that gives opponents generous shares to start negotiation.]\n"
+        return "\n[STRATEGY: Start with a closeable deal, not a fair split. Allocate opponents enough to likely exceed utility 5.0 while preserving learner utility.]\n"
 
     hints = []
 
@@ -241,8 +256,8 @@ def _build_strategy_hints(
     accepts = sum(1 for turn in history if "accept" in turn.lower() and "reject" not in turn.lower() and not turn.startswith("learner"))
 
     if rejections > 0 and accepts == 0:
-        hints.append(f"Opponents have rejected {rejections} time(s). INCREASE their shares significantly.")
-        hints.append("Give opponents MORE of the resources they seem to want.")
+        hints.append(f"Opponents have rejected {rejections} time(s). At least one opponent is likely below utility 5.0.")
+        hints.append("Significantly increase resources for the likely rejecting opponent before optimizing learner share.")
 
     if accepts > 0:
         hints.append(f"{accepts} opponent(s) have shown willingness to accept. Consider ACCEPT: YES if a deal is on the table.")
@@ -250,12 +265,12 @@ def _build_strategy_hints(
     # Anti-repetition
     learner_proposals = [t for t in history if t.startswith("learner:") and "gpu" in t.lower()]
     if len(learner_proposals) >= 2:
-        hints.append("WARNING: Do NOT repeat your previous proposal. You must try a DIFFERENT allocation.")
+        hints.append("WARNING: Do NOT repeat your previous proposal. Make a substantially different allocation.")
 
     # Urgency-based hints
     if urgency == "HIGH":
-        hints.append("URGENT: Very few rounds left! Make major concessions to close a deal NOW.")
-        hints.append("Consider giving opponents 40+ units of each resource.")
+        hints.append("URGENT: Very few rounds left. Close the deal now by pushing both opponents clearly above utility 5.0.")
+        hints.append("Avoid balanced splits; use targeted concessions to acceptability thresholds.")
     elif urgency == "MEDIUM":
         hints.append("Time is running out. Be more generous to opponents.")
 

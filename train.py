@@ -188,7 +188,7 @@ def _make_model_policy(model, tokenizer, difficulty: str, max_rounds: int):
             validated = (
                 validate_and_fix_proposal(f"PROPOSE: {last_proposal}")
                 if last_proposal
-                else validate_and_fix_proposal("PROPOSE: learner: gpu 34 cpu 34 memory 34; opponent_1: gpu 33 cpu 33 memory 33; opponent_2: gpu 33 cpu 33 memory 33")
+                else validate_and_fix_proposal("PROPOSE: learner: gpu 32 cpu 32 memory 32; opponent_1: gpu 34 cpu 34 memory 34; opponent_2: gpu 34 cpu 34 memory 34")
             )
         if obs.get("last_opponent_response", "") in {"partial_accept", "rejected", "repeated_proposal"}:
             rejecting = "opponent_1" if opp_status["opponent_1"] == "reject" else ("opponent_2" if opp_status["opponent_2"] == "reject" else None)
