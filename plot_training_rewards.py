@@ -172,6 +172,62 @@ def plot_reward_curves(
     plt.close(fig)
 
 
+def plot_reward_curves_separately(
+    log_history: List[Dict[str, Any]],
+    out_dir: Path,
+    *,
+    smooth: int = 0,
+    show: bool = False,
+) -> List[Path]:
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    df = pd.DataFrame(log_history)
+    if "step" not in df.columns:
+        raise ValueError("log_history has no 'step' column — unexpected TrainerState format.")
+
+    metric_cols = _reward_columns([c for c in df.columns if c != "step"])
+    if not metric_cols:
+        raise ValueError(
+            "No reward columns found in log_history. "
+            "Expected keys like 'reward', 'reward_std', or 'rewards/*/mean'."
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    steps = df["step"].to_numpy()
+    colors = plt.cm.tab10.colors
+    written: List[Path] = []
+
+    for i, col in enumerate(metric_cols):
+        series = pd.to_numeric(df[col], errors="coerce")
+        y = series.rolling(window=smooth, min_periods=1).mean() if smooth > 1 else series
+        label = f"{col} (rolling-{smooth})" if smooth > 1 else col
+
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5), constrained_layout=True)
+        ax.plot(
+            steps,
+            y.to_numpy(),
+            label=label,
+            color=colors[i % len(colors)],
+            linewidth=2 if col == "reward" else 1.2,
+        )
+        ax.set_title(f"CogniMarket — {col} progress")
+        ax.set_xlabel("Training step")
+        ax.set_ylabel(col)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+
+        safe_name = col.replace("/", "_")
+        out_path = out_dir / f"{safe_name}_plot.png"
+        fig.savefig(out_path, dpi=150)
+        if show:
+            plt.show()
+        plt.close(fig)
+        written.append(out_path)
+
+    return written
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Plot GRPO reward curves from trainer_state.json")
     p.add_argument(
@@ -185,6 +241,16 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Output PNG path (default: <checkpoint-dir>/reward_plot.png).",
+    )
+    p.add_argument(
+        "--separate",
+        action="store_true",
+        help="Write one reward plot per metric into --out directory.",
+    )
+    p.add_argument(
+        "--show",
+        action="store_true",
+        help="Show generated figures (useful in notebooks).",
     )
     p.add_argument("--smooth", type=int, default=0, help="Rolling-mean window (0 = off).")
     p.add_argument(
@@ -207,7 +273,6 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     ckpt: Path = args.checkpoint_dir
-    out_path: Path = args.out or (ckpt / "reward_plot.png")
 
     history = load_log_history(ckpt)
     pre_post: Optional[Dict[str, Dict[str, float]]] = None
@@ -227,14 +292,27 @@ def main() -> None:
         if isinstance(bl, dict) and "baseline" not in pre_post:
             pre_post["baseline"] = bl
 
-    plot_reward_curves(
-        history,
-        out_path,
-        title="CogniMarket — GRPO training reward progress",
-        smooth=args.smooth,
-        pre_post_eval=pre_post,
-    )
-    print(f"Wrote {out_path.resolve()}")
+    if args.separate:
+        out_dir: Path = args.out if args.out else (ckpt / "reward_plots")
+        written = plot_reward_curves_separately(
+            history,
+            out_dir,
+            smooth=args.smooth,
+            show=args.show,
+        )
+        print(f"Wrote {len(written)} plot(s) to {out_dir.resolve()}")
+        for path in written:
+            print(f" - {path.resolve()}")
+    else:
+        out_path: Path = args.out or (ckpt / "reward_plot.png")
+        plot_reward_curves(
+            history,
+            out_path,
+            title="CogniMarket — GRPO training reward progress",
+            smooth=args.smooth,
+            pre_post_eval=pre_post,
+        )
+        print(f"Wrote {out_path.resolve()}")
 
 
 if __name__ == "__main__":
